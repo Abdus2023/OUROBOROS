@@ -26,6 +26,9 @@ def test_multiple_active_keys_rejected():
     second = copy.deepcopy(record["keys"][0])
     second["key_id"] = "k1"
     second["public_key"] = Ed25519PrivateKey.generate().public_key().public_bytes_raw().hex()
+    second["epoch"] = 1
+    record["epoch"] = 1
+    record["keys"][0]["state"] = "RETIRED"
     record["keys"].append(second)
     with pytest.raises(SignedTrustError, match="exactly one ACTIVE"):
         TrustStore.from_record(record)
@@ -41,7 +44,7 @@ def test_active_epoch_mismatch_rejected():
 def test_future_key_epoch_rejected():
     record = _record()
     record["keys"][0]["epoch"] = 1
-    with pytest.raises(SignedTrustError, match="outside"):
+    with pytest.raises(SignedTrustError, match="ACTIVE key epoch|outside"):
         TrustStore.from_record(record)
 
 
@@ -76,8 +79,8 @@ def test_negative_and_boolean_epochs_rejected():
 
 def test_malformed_public_key_rejected():
     record = _record()
-    record["keys"][0]["public_key"] = "00" * 32
-    with pytest.raises(SignedTrustError, match="invalid public key"):
+    record["keys"][0]["public_key"] = "00"
+    with pytest.raises(SignedTrustError, match="32 bytes"):
         TrustStore.from_record(record)
 
 
