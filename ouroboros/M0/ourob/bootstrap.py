@@ -219,4 +219,6 @@ class Bootstrap:
             raise BootstrapError("refusing to construct kernel from untrusted bootstrap: " + "; ".join(result.errors))
         return Kernel(repo_root=self.repo_root, journal=journal or Journal(self.journal_path),
                       policy=PolicyEngine(result.constitution, self.package_prefix), skills=result.registry,
-                      verifier=Verifier(self.repo_root, result.gates), promotion=PromotionAuthority())
+                      verifier=Verifier(self.repo_root, result.gates),
+                      promotion=PromotionAuthority(require_trust=result.trust_required),
+                      trust_authenticated=result.trust_authenticated)
