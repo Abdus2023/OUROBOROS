@@ -7,8 +7,8 @@ The repository is simultaneously the runtime source, capability registry, policy
 ## Layout
 
 ```
-ouroboros/M0/ourob/      implementation (kernel, policy, skills, verify, evidence, promotion, bootstrap, recovery, trust, signed_trust, planner, cli)
-ouroboros/M0/tests/      conformance suite (149 tests)
+ouroboros/M0/ourob/      implementation (kernel, policy, skills, verify, evidence, promotion, bootstrap, recovery, trust, signed_trust, trust_lifecycle, planner, cli)
+ouroboros/M0/tests/      conformance suite (M1.7 adds authenticated lifecycle coverage)
 policies/constitution.json   normative policy data (interpreter lives in ourob/policy.py)
 verification/gates.json      declared verification contract
 skills/manifest.json         repository-declared capabilities
@@ -28,7 +28,31 @@ docs/                        design log
 - Cold `Bootstrap` reconstructs capabilities strictly from `skills/manifest.json` and reports `trusted` only if the generation is unchanged across reconstruction.
 - `recovery` replays the journal through the fail-closed state machine: no durable event → no recovered authority.
 - Journal appends are serialized under `flock` and `fsync`'d before the lock is released (M1.4).
-- `Journal.read_trusted(anchor)` validates the chain against an anchor held **outside** the journal (M1.5); `read_signed_trusted(checkpoint, store)` additionally requires an Ed25519 signature from an externally provisioned trust store with ACTIVE/RETIRED/REVOKED key states and trust-epoch binding (M1.6). Hash-chain integrity ≠ authenticity.
+- `Journal.read_trusted(anchor)` validates the chain against an anchor held **outside** the journal (M1.5); `read_signed_trusted(checkpoint, store)` additionally requires an Ed25519 signature from an externally provisioned trust store with ACTIVE/RETIRED/REVOKED key states and trust-epoch binding (M1.6).
+- `trust_lifecycle` adds M1.7 signed rotation/revocation statements. A trust-store transition is accepted only when the current ACTIVE key authorizes the exact epoch transition and target; private signing keys remain outside the repository.
+- Hash-chain integrity, signature authenticity, and trust-state authorization are separate gates; passing one does not imply the others.
+
+## M1.7 trust lifecycle
+
+The trust store is **not** its own root of trust. A lifecycle mutation must carry an authorization signed by the current ACTIVE key:
+
+```text
+current ACTIVE key
+       │
+       │ signed TrustTransition
+       ▼
+verify signer + current epoch + operation invariants
+       │
+       ▼
+apply exactly one authenticated transition
+       │
+       ├── ROTATE → epoch + 1, old key RETIRED, fresh key ACTIVE
+       └── REVOKE → same epoch, target key REVOKED
+```
+
+A rotation statement is bound to the current epoch, next epoch, fresh key id and complete public-key material. A revocation statement is bound to the current epoch and a non-active target. Statements are immutable and replay-resistant through signer-state and epoch checks.
+
+The runtime never generates or persists private trust keys. The external authority signs statements; OUROBOROS verifies them using its provisioned public trust state.
 
 ## Quick start
 
@@ -50,4 +74,4 @@ python -m ourob recover --run r1 --checkpoint cp.json --trust-store store.json  
 
 ## Status
 
-M0 (deterministic self-hosting kernel) and M1.1–M1.6 (durable, tamper-evident, externally anchored, signature-authenticated recovery) are implemented. Requires `cryptography` for M1.6. See `docs/OUROBOROS_DESIGN_LOG.md` for the invariant list and next slice (M1.7: authenticated rotation/revocation statements).
+M0 (deterministic self-hosting kernel), M1.1–M1.6 (durable, tamper-evident, externally anchored, signature-authenticated recovery), and the M1.7 authenticated trust lifecycle foundation are implemented. Requires `cryptography` for M1.6/M1.7. M1.7 deliberately keeps trust-root provisioning outside repository-controlled state; the next hardening slice is integration of signed lifecycle statements with durable trust-state provisioning/recovery and current-vs-historical audit separation. See `docs/OUROBOROS_DESIGN_LOG.md` for the invariant list.
