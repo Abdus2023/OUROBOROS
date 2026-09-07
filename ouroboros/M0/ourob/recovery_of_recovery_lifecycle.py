@@ -22,31 +22,25 @@ from .signed_trust import ALGORITHM_ED25519, SignedTrustError, public_bytes
 
 RECOVERY_OF_RECOVERY_LIFECYCLE_SCHEMA = "ourob.recovery-of-recovery-lifecycle.v1"
 
-
 class RecoveryOfRecoveryOperation(StrEnum):
     ROTATE_SIGNER = "ROTATE_SIGNER"
     REVOKE_SIGNER = "REVOKE_SIGNER"
     CHANGE_THRESHOLD = "CHANGE_THRESHOLD"
 
-
 def _canonical(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-
 
 @dataclass(frozen=True)
 class RecoveryOfRecoveryLifecycleSignature:
     signer_key_id: str
     signature: bytes
-
     def __post_init__(self) -> None:
         if not isinstance(self.signer_key_id, str) or not self.signer_key_id:
             raise SignedTrustError("recovery quorum lifecycle signer id must be non-empty")
         if not isinstance(self.signature, (bytes, bytearray)) or not self.signature:
             raise SignedTrustError("recovery quorum lifecycle signature must be non-empty")
-
     def to_record(self) -> dict[str, str]:
         return {"signer_key_id": self.signer_key_id, "signature": bytes(self.signature).hex()}
-
 
 @dataclass(frozen=True)
 class RecoveryOfRecoveryLifecycleStatement:
@@ -59,7 +53,6 @@ class RecoveryOfRecoveryLifecycleStatement:
     reason: str
     signatures: tuple[RecoveryOfRecoveryLifecycleSignature, ...]
     algorithm: str = ALGORITHM_ED25519
-
     def __post_init__(self) -> None:
         if self.algorithm != ALGORITHM_ED25519:
             raise SignedTrustError(f"unsupported recovery quorum lifecycle algorithm: {self.algorithm!r}")
@@ -94,32 +87,17 @@ class RecoveryOfRecoveryLifecycleStatement:
         signer_ids = [item.signer_key_id for item in self.signatures]
         if len(signer_ids) != len(set(signer_ids)):
             raise SignedTrustError("recovery quorum lifecycle statement contains duplicate signers")
-
     def signed_payload(self) -> dict[str, Any]:
-        return {
-            "schema": RECOVERY_OF_RECOVERY_LIFECYCLE_SCHEMA,
-            "algorithm": self.algorithm,
-            "operation": self.operation.value,
-            "authority_epoch": self.authority_epoch,
-            "target_key_id": self.target_key_id,
-            "replacement_key_id": self.replacement_key_id,
-            "replacement_public_key": None if self.replacement_public_key is None else self.replacement_public_key.hex(),
-            "new_threshold": self.new_threshold,
-            "reason": self.reason,
-        }
-
+        return {"schema": RECOVERY_OF_RECOVERY_LIFECYCLE_SCHEMA, "algorithm": self.algorithm, "operation": self.operation.value, "authority_epoch": self.authority_epoch, "target_key_id": self.target_key_id, "replacement_key_id": self.replacement_key_id, "replacement_public_key": None if self.replacement_public_key is None else self.replacement_public_key.hex(), "new_threshold": self.new_threshold, "reason": self.reason}
     def signed_bytes(self) -> bytes:
         return _canonical(self.signed_payload())
-
     @property
     def binding_digest(self) -> str:
         return sha256(self.signed_bytes()).hexdigest()
-
     def to_record(self) -> dict[str, Any]:
         record = self.signed_payload()
         record["signatures"] = [item.to_record() for item in self.signatures]
         return record
-
     @classmethod
     def from_record(cls, record: Any) -> "RecoveryOfRecoveryLifecycleStatement":
         expected = {"schema", "algorithm", "operation", "authority_epoch", "target_key_id", "replacement_key_id", "replacement_public_key", "new_threshold", "reason", "signatures"}
@@ -133,7 +111,6 @@ class RecoveryOfRecoveryLifecycleStatement:
             raise SignedTrustError("malformed recovery quorum lifecycle statement") from exc
         return cls(operation, record["authority_epoch"], record["target_key_id"], record["replacement_key_id"], replacement, record["new_threshold"], record["reason"], signatures, record["algorithm"])
 
-
 def _validate_private_signers(private_keys: Iterable[tuple[str, Ed25519PrivateKey]], authority: RecoveryOfRecoveryAuthority) -> list[tuple[str, Ed25519PrivateKey]]:
     signers = list(private_keys)
     if len({key_id for key_id, _ in signers}) != len(signers):
@@ -145,15 +122,6 @@ def _validate_private_signers(private_keys: Iterable[tuple[str, Ed25519PrivateKe
     if len(signers) < authority.threshold:
         raise SignedTrustError("recovery quorum lifecycle threshold is not satisfied")
     return signers
-
-
-def sign_lifecycle_statement(private_keys: Iterable[tuple[str, Ed25519PrivateKey]], authority: RecoveryOfRecoveryAuthority, operation: RecoveryOfRecoveryOperation, *, target_key_id: str | None = None, replacement_key_id: str | None = None, replacement_public_key: bytes | None = None, new_threshold: int | None = None, reason: str) -> RecoveryOfRecoveryLifecycleStatement:
-    """Create a quorum-signed lifecycle statement using external private keys."""
-    signers = _validate_private_signers(private_keys, authority)
-    draft = RecoveryOfRecoveryLifecycleStatement(operation, authority.epoch, target_key_id, replacement_key_id, None if replacement_public_key is None else bytes(replacement_public_key), new_threshold, reason, tuple(RecoveryOfRecoveryLifecycleSignature(key_id, b"\0") for key_id, _ in signers))
-    signatures = tuple(RecoveryOfRecoveryLifecycleSignature(key_id, private_key.sign(draft.signed_bytes())) for key_id, private_key in signers)
-    return RecoveryOfRecoveryLifecycleStatement(draft.operation, draft.authority_epoch, draft.target_key_id, draft.replacement_key_id, draft.replacement_public_key, draft.new_threshold, draft.reason, signatures, draft.algorithm)
-
 
 def _next_membership(statement: RecoveryOfRecoveryLifecycleStatement, authority: RecoveryOfRecoveryAuthority) -> dict[str, bytes]:
     keys = dict(authority.keys)
@@ -176,6 +144,20 @@ def _next_membership(statement: RecoveryOfRecoveryLifecycleStatement, authority:
         del keys[statement.target_key_id]
     return keys
 
+def sign_lifecycle_statement(private_keys: Iterable[tuple[str, Ed25519PrivateKey]], authority: RecoveryOfRecoveryAuthority, operation: RecoveryOfRecoveryOperation, *, target_key_id: str | None = None, replacement_key_id: str | None = None, replacement_public_key: bytes | None = None, new_threshold: int | None = None, reason: str) -> RecoveryOfRecoveryLifecycleStatement:
+    """Create a quorum-signed lifecycle statement using external private keys."""
+    signers = _validate_private_signers(private_keys, authority)
+    draft = RecoveryOfRecoveryLifecycleStatement(operation, authority.epoch, target_key_id, replacement_key_id, None if replacement_public_key is None else bytes(replacement_public_key), new_threshold, reason, tuple(RecoveryOfRecoveryLifecycleSignature(key_id, b"\0") for key_id, _ in signers))
+    # Validate the proposed membership/threshold before signing. Signer
+    # authorization remains a verification-time concern so adversarial fixtures
+    # can demonstrate that a stale signer cannot authorize a later transition.
+    _next_membership(draft, authority)
+    threshold = authority.threshold if new_threshold is None else new_threshold
+    next_keys = _next_membership(draft, authority)
+    if threshold < 1 or threshold > len(next_keys):
+        raise SignedTrustError("recovery quorum threshold is incompatible with membership")
+    signatures = tuple(RecoveryOfRecoveryLifecycleSignature(key_id, private_key.sign(draft.signed_bytes())) for key_id, private_key in signers)
+    return RecoveryOfRecoveryLifecycleStatement(draft.operation, draft.authority_epoch, draft.target_key_id, draft.replacement_key_id, draft.replacement_public_key, draft.new_threshold, draft.reason, signatures, draft.algorithm)
 
 def verify_lifecycle_statement(statement: RecoveryOfRecoveryLifecycleStatement, authority: RecoveryOfRecoveryAuthority) -> None:
     if statement.authority_epoch != authority.epoch:
@@ -184,8 +166,8 @@ def verify_lifecycle_statement(statement: RecoveryOfRecoveryLifecycleStatement, 
     threshold = authority.threshold if statement.new_threshold is None else statement.new_threshold
     if threshold < 1 or threshold > len(keys):
         raise SignedTrustError("recovery quorum threshold is incompatible with membership")
-    valid = 0
     seen: set[str] = set()
+    valid = 0
     for item in statement.signatures:
         if item.signer_key_id in seen:
             raise SignedTrustError("recovery quorum lifecycle signer replay detected")
@@ -201,32 +183,22 @@ def verify_lifecycle_statement(statement: RecoveryOfRecoveryLifecycleStatement, 
     if valid < authority.threshold:
         raise SignedTrustError("recovery quorum lifecycle threshold is not satisfied")
 
-
 def apply_lifecycle_statement(statement: RecoveryOfRecoveryLifecycleStatement, authority: RecoveryOfRecoveryAuthority) -> RecoveryOfRecoveryAuthority:
-    """Verify then atomically advance quorum membership/threshold and epoch."""
     verify_lifecycle_statement(statement, authority)
     keys = _next_membership(statement, authority)
     threshold = authority.threshold if statement.new_threshold is None else statement.new_threshold
     return RecoveryOfRecoveryAuthority(keys, threshold, authority.epoch + 1, authority.algorithm)
 
-
 def recovery_of_recovery_lifecycle_event(statement: RecoveryOfRecoveryLifecycleStatement) -> Event:
     """Create the unscoped durable event carrying one authenticated transition."""
     return Event(EventName.RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED.value, data={"lifecycle": statement.to_record()})
 
-
 def recover_recovery_of_recovery_authority(events: Iterable[Any], initial_authority: RecoveryOfRecoveryAuthority) -> RecoveryOfRecoveryAuthority:
-    """Replay quorum lifecycle statements strictly in journal order.
-
-    The supplied initial authority is the external root. No event can create
-    or replace that root before its own statement is authenticated by the
-    authority current at that exact journal position.
-    """
+    """Replay quorum lifecycle statements strictly in journal order."""
     authority = RecoveryOfRecoveryAuthority(dict(initial_authority.keys), initial_authority.threshold, initial_authority.epoch, initial_authority.algorithm)
     seen: set[str] = set()
     for event in events:
-        name = getattr(event, "name", None)
-        if name != EventName.RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED.value:
+        if getattr(event, "name", None) != EventName.RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED.value:
             continue
         if any(getattr(event, field, None) is not None for field in ("run_id", "action_id", "generation")):
             raise SignedTrustError("recovery quorum lifecycle event must not be run-scoped")
