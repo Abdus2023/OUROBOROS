@@ -1,0 +1,23 @@
+{
+  "schema": "ourob.constitution.v1",
+  "mode": "fail_closed",
+  "invariants": [
+    "M0-INV-01",
+    "M0-INV-02",
+    "M0-INV-03",
+    "M0-INV-04",
+    "M0-INV-05",
+    "M0-INV-06",
+    "M0-INV-07",
+    "M0-INV-08",
+    "M0-INV-09",
+    "M0-INV-10",
+    "M0-INV-11",
+    "M0-INV-12",
+    "M0-INV-13",
+    "M0-INV-14",
+    "M0-INV-15",
+    "M0-META-01"
+  ],
+  "protected_surfaces": ["ouroboros/M0/ourob/kernel.py", "ouroboros/M0/ourob/policy.py", "verification/", "bootstrap/"]
+}
