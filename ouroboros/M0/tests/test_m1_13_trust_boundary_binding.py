@@ -33,16 +33,12 @@ def test_current_boundary_accepts_matching_state_and_head(tmp_path: Path):
 def test_current_boundary_rejects_wrong_trust_state_digest(tmp_path: Path):
     journal = Journal(tmp_path / "journal.jsonl")
     store, checkpoint = _authority("generation-a")
-    key = store.active.verifier()
-    wrong_store = TrustStore.from_record(store.to_record())
-    # Produce a cryptographically valid checkpoint for a different trust state
-    # using the original signing key; the boundary must reject the mismatch.
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    signing_key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex("00" * 32)) if False else None
     assert checkpoint.trust_state_digest == trust_state_digest(store)
     tampered = dataclasses.replace(checkpoint, trust_state_digest="0" * 64)
     with pytest.raises(TrustBoundaryError, match="trust state"):
-        authenticate_current_repository(journal, ExternalTrustAuthority(wrong_store, tampered), generation="generation-a")
+        authenticate_current_repository(
+            journal, ExternalTrustAuthority(store, tampered), generation="generation-a"
+        )
 
 
 def test_current_boundary_rejects_wrong_generation(tmp_path: Path):
