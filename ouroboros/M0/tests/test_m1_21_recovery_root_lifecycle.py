@@ -72,13 +72,18 @@ def test_root_rotation_requires_fresh_key_id_and_material(tmp_path: Path):
         sign_recovery_root_rotation(private, root, "recovery-root-1", root.public_key)
 
 
-def test_root_rotation_replay_is_rejected(tmp_path: Path):
+def test_root_rotation_replay_and_historical_id_reuse_are_rejected(tmp_path: Path):
     journal, root, private = _fixture(tmp_path)
     replacement = Ed25519PrivateKey.generate()
     statement = sign_recovery_root_rotation(private, root, "recovery-root-1", replacement.public_key().public_bytes_raw())
     append_authorized_recovery_root_rotation(journal, statement, root)
     with pytest.raises(TrustRecoveryError):
         append_authorized_recovery_root_rotation(journal, statement, root)
+    second_private = replacement
+    current = recover_recovery_authority((r.event for r in journal.records()), root)
+    reuse = sign_recovery_root_rotation(second_private, current, root.key_id, Ed25519PrivateKey.generate().public_key().public_bytes_raw())
+    with pytest.raises(TrustRecoveryError, match="already been used"):
+        recover_recovery_authority([*[(r.event) for r in journal.records()], Event(EventName.RECOVERY_ROOT_ROTATION_AUTHORIZED.value, data={"transition": reuse.to_record()})], root)
 
 
 def test_root_rotation_is_not_run_scoped(tmp_path: Path):
