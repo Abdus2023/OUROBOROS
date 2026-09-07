@@ -1,18 +1,20 @@
 """M1.18 — explicit checkpoint authority state classification.
 
-Structural validity is not authority.  A checkpoint is authoritative only
-when it authenticates the current journal, generation, and reconstructed trust
-state against the externally provisioned genesis root.
+Structural validity is not authority. A checkpoint is authoritative only when
+it authenticates the current journal, generation, and reconstructed trust state
+against the externally provisioned genesis root.
 """
 from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
 
-from .checkpoint_recovery import CheckpointRecoveryError, inspect_checkpoint
-from .checkpoint_store import load_checkpoint
-from .journal import Journal
+from .checkpoint_recovery import inspect_checkpoint
+from .checkpoint_store import CheckpointPublicationError, load_checkpoint
+from .journal import Journal, JournalIntegrityError
+from .signed_trust import TrustStore
 from .trust_boundary import ExternalTrustAuthority, TrustBoundaryError, authenticate_current_repository
+from .trust_recovery import TrustRecoveryError, recover_trust_store
 
 
 class CheckpointAuthorityState(StrEnum):
@@ -34,36 +36,40 @@ def classify_checkpoint(
     *,
     generation: str,
 ) -> CheckpointAuthorityState:
-    """Classify one externally published checkpoint without granting authority."""
+    """Classify one checkpoint without granting authority."""
     path = Path(checkpoint_path)
     if not path.exists():
         return CheckpointAuthorityState.ABSENT
     try:
         checkpoint = load_checkpoint(path)
-    except Exception:
+    except CheckpointPublicationError:
         return CheckpointAuthorityState.INVALID
+
     try:
         authenticate_current_repository(
             journal,
             ExternalTrustAuthority(authority.initial_store, checkpoint),
             generation=generation,
         )
+        return CheckpointAuthorityState.CURRENT
     except TrustBoundaryError:
-        return _classify_noncurrent(journal, authority, checkpoint, generation)
-    return CheckpointAuthorityState.CURRENT
+        pass
 
-
-def _classify_noncurrent(journal, authority, checkpoint, generation: str) -> CheckpointAuthorityState:
-    """Distinguish ordinary staleness from an explicitly revoked signer."""
+    # REVOKED is a stronger diagnosis than STALE: the signed checkpoint names
+    # a key which the authenticated trust history has permanently revoked.
     try:
         records = journal.records()
-        # A revoked signer can never be authoritative, even historically for
-        # current use.  inspect_checkpoint is deliberately non-authoritative.
-        report = inspect_checkpoint(checkpoint, records, generation, authority.initial_store)
-        if report.state == "REVOKED":
+        recovered = recover_trust_store(
+            (record.event for record in records), authority.initial_store
+        )
+        key = recovered.keys.get(checkpoint.key_id)
+        if key is not None and key.state.value == "REVOKED":
             return CheckpointAuthorityState.REVOKED
-    except Exception:
-        pass
+        # Keep the recovery helper in the classification path so a malformed
+        # trust history never gets silently promoted to a semantic state.
+        inspect_checkpoint(path, journal, authority.initial_store, generation=generation)
+    except (JournalIntegrityError, TrustRecoveryError, ValueError, TypeError):
+        return CheckpointAuthorityState.INVALID
     return CheckpointAuthorityState.STALE
 
 
@@ -77,4 +83,6 @@ def require_current_checkpoint(
     """Fail closed unless the supplied checkpoint is the current authority."""
     state = classify_checkpoint(journal, authority, checkpoint_path, generation=generation)
     if state is not CheckpointAuthorityState.CURRENT:
-        raise CheckpointAuthorityError(f"checkpoint authority state is {state.value}; CURRENT required")
+        raise CheckpointAuthorityError(
+            f"checkpoint authority state is {state.value}; CURRENT required"
+        )
