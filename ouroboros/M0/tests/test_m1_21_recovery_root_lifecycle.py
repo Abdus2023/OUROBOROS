@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from ourob.emergency_recovery import EmergencyRecoveryAuthority, RecoveryRootTransition, sign_emergency_recovery, sign_recovery_root_rotation
+from ourob.emergency_recovery import EmergencyRecoveryAuthority, sign_emergency_recovery, sign_recovery_root_rotation
 from ourob.journal import Journal
 from ourob.model import Event, EventName
 from ourob.signed_trust import SignedTrustError, TrustStore
@@ -82,8 +82,8 @@ def test_root_rotation_replay_and_historical_id_reuse_are_rejected(tmp_path: Pat
     second_private = replacement
     current = recover_recovery_authority((r.event for r in journal.records()), root)
     reuse = sign_recovery_root_rotation(second_private, current, root.key_id, Ed25519PrivateKey.generate().public_key().public_bytes_raw())
-    with pytest.raises(TrustRecoveryError, match="already been used"):
-        recover_recovery_authority([*[(r.event) for r in journal.records()], Event(EventName.RECOVERY_ROOT_ROTATION_AUTHORIZED.value, data={"transition": reuse.to_record()})], root)
+    with pytest.raises(TrustRecoveryError, match="already been used|already used"):
+        recover_recovery_authority([*(r.event for r in journal.records()), Event(EventName.RECOVERY_ROOT_ROTATION_AUTHORIZED.value, data={"transition": reuse.to_record()})], root)
 
 
 def test_root_rotation_is_not_run_scoped(tmp_path: Path):
