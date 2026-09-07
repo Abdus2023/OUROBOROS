@@ -32,9 +32,10 @@ def recover_authoritative_state(events: Iterable[Event], initial_store: TrustSto
     seen: set[str] = set()
     used_recovery_ids: set[str] = {recovery.key_id} if recovery else set()
     used_quorum_ids: set[str] = set(quorum.keys) if quorum else set()
+    lifecycle_event_name = EventName.RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED.value
     for event in tuple(events):
         try:
-            if event.name == EventName.RECOVERY_QUORUM_LIFECYCLE_AUTHORIZED.value:
+            if event.name == lifecycle_event_name:
                 _unscoped(event, "recovery-quorum lifecycle")
                 if quorum is None:
                     raise AuthoritativeRecoveryError("recovery-quorum lifecycle requires an externally provisioned quorum")
@@ -107,7 +108,7 @@ def recover_authoritative_state_from_journal(journal: Journal, initial_store: Tr
     return recover_authoritative_state((record.event for record in records), initial_store, recovery_authority, recovery_quorum)
 
 def recovery_quorum_lifecycle_event(statement: RecoveryOfRecoveryLifecycleStatement) -> Event:
-    return Event(EventName.RECOVERY_QUORUM_LIFECYCLE_AUTHORIZED.value, data={"lifecycle": statement.to_record()})
+    return Event(EventName.RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED.value, data={"lifecycle": statement.to_record()})
 
 def append_authorized_recovery_quorum_lifecycle(journal: Journal, statement: RecoveryOfRecoveryLifecycleStatement, initial_store: TrustStore, recovery_authority: EmergencyRecoveryAuthority, recovery_quorum: RecoveryOfRecoveryAuthority) -> JournalRecord:
     """Atomically authorize a quorum lifecycle transition against the journal head."""
@@ -117,7 +118,7 @@ def append_authorized_recovery_quorum_lifecycle(journal: Journal, statement: Rec
             _, _, current_quorum = recover_authoritative_state((record.event for record in existing), initial_store, recovery_authority, recovery_quorum)
             if current_quorum is None:
                 raise AuthoritativeRecoveryError("recovery-quorum lifecycle requires an externally provisioned quorum")
-            if any(record.event.name == EventName.RECOVERY_QUORUM_LIFECYCLE_AUTHORIZED.value and record.event.data.get("lifecycle") == statement.to_record() for record in existing):
+            if any(record.event.name == EventName.RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED.value and record.event.data.get("lifecycle") == statement.to_record() for record in existing):
                 raise AuthoritativeRecoveryError("recovery-quorum lifecycle replay detected")
             verify_lifecycle_statement(statement, current_quorum)
         except AuthoritativeRecoveryError:
