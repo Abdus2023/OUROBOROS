@@ -1,11 +1,12 @@
 """Conformance tests for M1.7/M1.8 authenticated trust-state recovery."""
+from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from ourob.journal import Journal
 from ourob.model import Event, EventName
 from ourob.signed_trust import KeyState, TrustStore
 from ourob.trust_lifecycle import sign_rotation, sign_revocation
-from ourob.trust_recovery import TrustRecoveryError, append_authorized_transition, recover_trust_store, trust_transition_event
+from ourob.trust_recovery import TrustRecoveryError, append_authorized_transition, recover_trust_store, recover_trust_store_from_journal, trust_transition_event
 
 def authority():
     k0=Ed25519PrivateKey.generate()
@@ -37,15 +38,20 @@ def test_trust_event_must_not_be_run_scoped():
     keys,store=authority(); k1=Ed25519PrivateKey.generate(); statement=sign_rotation(keys["k0"],store,"k1",k1.public_key()); event=Event(EventName.TRUST_TRANSITION_AUTHORIZED.value,"run",data={"transition":statement.to_record()})
     with pytest.raises(TrustRecoveryError,match="run-scoped"): recover_trust_store([event],store)
 
-def test_atomic_append_reconstructs_state_before_authorizing():
-    keys,store=authority(); journal=Journal(__import__('pathlib').Path("journal.jsonl")); k1=Ed25519PrivateKey.generate(); statement=sign_rotation(keys["k0"],store,"k1",k1.public_key())
+def test_atomic_append_reconstructs_state_before_authorizing(tmp_path: Path):
+    keys,store=authority(); journal=Journal(tmp_path/"journal.jsonl"); k1=Ed25519PrivateKey.generate(); statement=sign_rotation(keys["k0"],store,"k1",k1.public_key())
     record=append_authorized_transition(journal,statement,store)
     assert record.sequence==1
-    recovered=recover_trust_store_from_journal(journal.path,store) if False else recover_trust_store(journal.events(),store)
+    recovered=recover_trust_store_from_journal(journal.path,store)
     assert recovered.active.key_id=="k1"
 
-def test_atomic_append_refuses_stale_statement_without_writing():
-    keys,store=authority(); journal=Journal(__import__('pathlib').Path("journal.jsonl")); k1=Ed25519PrivateKey.generate(); first=sign_rotation(keys["k0"],store,"k1",k1.public_key()); append_authorized_transition(journal,first,store)
+def test_atomic_append_refuses_stale_statement_without_writing(tmp_path: Path):
+    keys,store=authority(); journal=Journal(tmp_path/"journal.jsonl"); k1=Ed25519PrivateKey.generate(); first=sign_rotation(keys["k0"],store,"k1",k1.public_key()); append_authorized_transition(journal,first,store)
     k2=Ed25519PrivateKey.generate(); stale=sign_rotation(keys["k0"],store,"k2",k2.public_key())
     with pytest.raises(TrustRecoveryError): append_authorized_transition(journal,stale,store)
     assert len(journal.records())==1
+
+def test_atomic_append_rejects_corrupt_journal_before_validation(tmp_path: Path):
+    journal=Journal(tmp_path/"journal.jsonl"); journal.append(Event("RUN_CREATED","r",generation="a"*64,data={"task":"x"})); journal.path.write_text(journal.path.read_text()+"not-json\n",encoding="utf-8")
+    _,store=authority(); k1=Ed25519PrivateKey.generate(); statement=sign_rotation(_,store,"k1",k1.public_key())
+    with pytest.raises(Exception): append_authorized_transition(journal,statement,store)
