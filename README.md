@@ -31,7 +31,42 @@ docs/                        design log
 - M1.8 `append_authorized_transition()` reconstructs current trust state and verifies the next transition **while holding the journal append lock**, preventing concurrent check-then-append races from creating conflicting trust epochs.
 - M1.9 `trust_boundary.authenticate_current_repository()` authenticates the external root, replays durable trust transitions, verifies the signed checkpoint, and requires exact current journal-head and repository-generation binding. Older checkpoints remain historical-audit material and cannot authorize current bootstrap.
 - M1.10 carries that authenticated trust decision into the kernel: an authoritative kernel configures promotion to require the same external trust boundary. Verification evidence alone cannot restore current authority.
+- M1.11 makes the trust-state representation itself fail closed: exactly one ACTIVE key, ACTIVE epoch equal to store epoch, no future key epochs, one key per epoch, valid public-key material, unique key IDs, and no extra/private-key fields. Lifecycle mutation is exposed only through authenticated transition machinery; `genesis()` is the provisioning boundary.
 - Hash-chain integrity, signature authenticity, trust-state authorization, current-generation binding, and authority propagation are separate gates; passing one does not imply the others.
+
+## M1.11 trust-state invariants
+
+```text
+EXTERNAL PROVISIONING
+       │
+       ▼
+    genesis()
+       │
+       ▼
+TRUST STORE INVARIANTS
+       │
+       ├── exactly one ACTIVE key
+       ├── ACTIVE.epoch == store.epoch
+       ├── every key.epoch <= store.epoch
+       ├── exactly one key per epoch
+       ├── unique key_id ↔ TrustKey.key_id
+       ├── supported algorithm + valid Ed25519 public key
+       └── no private/extra serialized fields
+       │
+       ▼
+SIGNED TrustTransition
+       │
+       ▼
+verify signer + epoch + target
+       │
+       ▼
+private mutation primitive
+       │
+       ▼
+revalidate invariants
+```
+
+`TrustStore.from_record()` is a strict parser/validator, not a trust initializer. A serialized store that violates lifecycle invariants is unusable before checkpoint verification or lifecycle replay. Direct public rotation/revocation mutation paths have been removed; state changes must pass through an authenticated lifecycle statement.
 
 ## M1.10 authority propagation
 
@@ -148,4 +183,4 @@ python -m ourob recover --run r1 --checkpoint cp.json --trust-store store.json
 
 ## Status
 
-M0 (deterministic self-hosting kernel), M1.1–M1.6 (durable, tamper-evident, externally anchored, signature-authenticated recovery), M1.7/M1.8 (authenticated lifecycle, durable trust-state replay, and atomic trust-transition authorization), M1.9 (authoritative cold-start/current-generation trust boundary), and M1.10 (kernel/promotion authority propagation) are implemented at source level. Requires `cryptography` for signed trust. Execution/CI evidence must be established by the repository's declared verification gates before a release is considered verified. No test/CI result is claimed here without execution evidence. See `docs/OUROBOROS_DESIGN_LOG.md` for the invariant list and next hardening slices.
+M0 (deterministic self-hosting kernel), M1.1–M1.6 (durable, tamper-evident, externally anchored, signature-authenticated recovery), M1.7/M1.8 (authenticated lifecycle, durable trust-state replay, and atomic trust-transition authorization), M1.9 (authoritative cold-start/current-generation trust boundary), M1.10 (kernel/promotion authority propagation), and M1.11 (strict trust-state invariants and authenticated-only lifecycle mutation) are implemented at source level. Requires `cryptography` for signed trust. Execution/CI evidence must be established by the repository's declared verification gates before a release is considered verified. No test/CI result is claimed here without execution evidence. See `docs/OUROBOROS_DESIGN_LOG.md` for the invariant list and next hardening slices.
