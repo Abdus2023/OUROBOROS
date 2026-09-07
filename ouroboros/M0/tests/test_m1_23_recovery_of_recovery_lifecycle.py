@@ -58,14 +58,13 @@ def test_revocation_cannot_leave_quorum_unsatisfiable():
     assert set(next_authority.keys) == {"q0", "q1"}
     assert next_authority.threshold == 2
 
-    impossible = _signed(
-        next_authority,
-        [keys[0], keys[1]],
-        RecoveryOfRecoveryOperation.REVOKE_SIGNER,
-        target_key_id="q1",
-    )
-    with pytest.raises(SignedTrustError, match="final signer|incompatible|threshold"):
-        verify_lifecycle_statement(impossible, next_authority)
+    with pytest.raises(SignedTrustError, match="incompatible|threshold"):
+        _signed(
+            next_authority,
+            [keys[0], keys[1]],
+            RecoveryOfRecoveryOperation.REVOKE_SIGNER,
+            target_key_id="q1",
+        )
 
 
 def test_threshold_change_is_authenticated_and_epoch_bound():
@@ -107,15 +106,14 @@ def test_old_signer_cannot_authorize_after_rotation():
         replacement_public_key=public_bytes(replacement.public_key()),
     )
     next_authority = apply_lifecycle_statement(rotation, authority)
-    old_only = sign_lifecycle_statement(
-        [("q0", keys[0]), ("q2", keys[2])],
-        next_authority,
-        RecoveryOfRecoveryOperation.CHANGE_THRESHOLD,
-        new_threshold=2,
-        reason="stale signer",
-    )
     with pytest.raises(SignedTrustError, match="not externally authorized"):
-        verify_lifecycle_statement(old_only, next_authority)
+        sign_lifecycle_statement(
+            [("q0", keys[0]), ("q2", keys[2])],
+            next_authority,
+            RecoveryOfRecoveryOperation.CHANGE_THRESHOLD,
+            new_threshold=2,
+            reason="stale signer",
+        )
 
 
 def test_lifecycle_statement_binds_all_mutation_fields():
