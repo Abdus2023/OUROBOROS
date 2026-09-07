@@ -11,7 +11,7 @@ from typing import Any
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from .signed_trust import ALGORITHM_ED25519, SignedTrustError, TrustStore
+from .signed_trust import ALGORITHM_ED25519, KeyState, SignedTrustError, TrustStore
 
 LIFECYCLE_SCHEMA = "ourob.trust-transition.v1"
 
@@ -130,7 +130,7 @@ def verify_transition(statement: TrustTransition, store: TrustStore) -> None:
             raise SignedTrustError("revocation target key is unknown")
         if target.key_id == store.active.key_id:
             raise SignedTrustError("cannot revoke the current ACTIVE key")
-        if target.state is target.state.REVOKED:
+        if target.state is KeyState.REVOKED:
             raise SignedTrustError("revocation target is already REVOKED")
     else:  # pragma: no cover
         raise SignedTrustError("unsupported lifecycle operation")
