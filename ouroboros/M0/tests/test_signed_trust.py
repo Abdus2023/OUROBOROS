@@ -16,7 +16,6 @@ GEN = "a" * 64
 
 @pytest.fixture
 def authority():
-    """Simulates an external key authority. Private keys live only here."""
     k0 = Ed25519PrivateKey.generate()
     store = TrustStore.genesis("k0", k0.public_key())
     return {"k0": k0}, store
@@ -47,10 +46,7 @@ def test_roundtrip_and_signed_read(journal_path, authority):
     assert len(journal.read_signed_trusted(restored, store, GEN)) == 3
 
 
-@pytest.mark.parametrize("field,value", [
-    ("sequence", 2), ("journal_digest", "f" * 64), ("generation", "b" * 64),
-    ("trust_epoch", 1), ("key_id", "k1"), ("algorithm", "ed448"),
-])
+@pytest.mark.parametrize("field,value", [("sequence", 2), ("journal_digest", "f" * 64), ("generation", "b" * 64), ("trust_epoch", 1), ("key_id", "k1"), ("algorithm", "ed448")])
 def test_any_signed_field_tamper_fails(journal_path, authority, field, value):
     keys, store = authority
     journal = journal_with(journal_path)
@@ -122,7 +118,6 @@ def test_epoch_rollback_rejected(journal_path, authority):
 
 
 def test_repository_cannot_choose_the_trust_epoch(journal_path, authority):
-    """A valid signature is not enough: the verifier's store decides the epoch."""
     keys, store = authority
     journal = journal_with(journal_path)
     anchor = JournalTrustAnchor.capture(journal.records())
