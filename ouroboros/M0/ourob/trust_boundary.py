@@ -5,13 +5,14 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .authoritative_recovery import AuthoritativeRecoveryError, recover_authoritative_state
 from .emergency_recovery import EmergencyRecoveryAuthority
 from .generation import repository_generation
 from .journal import Journal, JournalIntegrityError, JournalRecord
+from .recovery_of_recovery import RecoveryOfRecoveryAuthority
 from .signed_trust import SignedTrustError, TrustStore
 from .trust import TrustAnchorError, verify_anchor
 from .trust_checkpoint import TRUST_BOUND_CHECKPOINT_SCHEMA, TrustStateBoundCheckpoint, trust_state_digest
-from .trust_recovery import TrustRecoveryError, recover_trust_store
 
 
 class TrustBoundaryError(RuntimeError):
@@ -21,16 +22,17 @@ class TrustBoundaryError(RuntimeError):
 @dataclass(frozen=True)
 class ExternalTrustAuthority:
     """Externally provisioned authority material used only for verification."""
-
     initial_store: TrustStore
     checkpoint: TrustStateBoundCheckpoint
     recovery: EmergencyRecoveryAuthority | None = None
+    recovery_quorum: RecoveryOfRecoveryAuthority | None = None
 
 
 def load_external_authority(
     checkpoint_path: Path,
     trust_store_path: Path,
     recovery: EmergencyRecoveryAuthority | None = None,
+    recovery_quorum: RecoveryOfRecoveryAuthority | None = None,
 ) -> ExternalTrustAuthority:
     """Load public authority material from externally supplied paths."""
     try:
@@ -40,7 +42,7 @@ def load_external_authority(
         store = TrustStore.from_record(store_raw)
     except (OSError, json.JSONDecodeError, ValueError, TypeError, SignedTrustError) as exc:
         raise TrustBoundaryError(f"external trust material is invalid: {exc}") from exc
-    return ExternalTrustAuthority(store, checkpoint, recovery)
+    return ExternalTrustAuthority(store, checkpoint, recovery, recovery_quorum)
 
 
 def authenticate_current_repository(
@@ -52,8 +54,11 @@ def authenticate_current_repository(
     """Authenticate current trust state, journal head, generation, and recovery history."""
     try:
         records = journal.records()
-        recovered_store = recover_trust_store(
-            (record.event for record in records), authority.initial_store, authority.recovery
+        recovered_store, _, _ = recover_authoritative_state(
+            (record.event for record in records),
+            authority.initial_store,
+            authority.recovery,
+            authority.recovery_quorum,
         )
         current_generation = generation if generation is not None else repository_generation(journal.path.parent.parent).id
         checkpoint = authority.checkpoint
@@ -73,7 +78,7 @@ def authenticate_current_repository(
         recovered_store.verify(checkpoint, historical=False)
         verify_anchor(checkpoint.anchor, records, current_generation)
         return recovered_store, tuple(records)
-    except (JournalIntegrityError, SignedTrustError, TrustAnchorError, TrustRecoveryError) as exc:
+    except (JournalIntegrityError, SignedTrustError, TrustAnchorError, AuthoritativeRecoveryError) as exc:
         raise TrustBoundaryError(f"current trust authentication failed: {exc}") from exc
 
 
@@ -84,9 +89,10 @@ def authenticate_current_paths(
     *,
     repo_root: Path,
     recovery: EmergencyRecoveryAuthority | None = None,
+    recovery_quorum: RecoveryOfRecoveryAuthority | None = None,
 ) -> TrustStore:
     """Authenticate current authority from externally supplied public files."""
-    authority = load_external_authority(checkpoint_path, trust_store_path, recovery)
+    authority = load_external_authority(checkpoint_path, trust_store_path, recovery, recovery_quorum)
     generation = repository_generation(repo_root).id
     store, _ = authenticate_current_repository(Journal(journal_path), authority, generation=generation)
     return store
