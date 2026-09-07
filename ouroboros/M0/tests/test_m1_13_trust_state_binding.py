@@ -51,7 +51,7 @@ def test_v2_checkpoint_requires_generation():
     key = Ed25519PrivateKey.generate()
     store = TrustStore.genesis("k0", key.public_key())
     with pytest.raises(SignedTrustError, match="generation"):
-        TrustStateBoundCheckpoint("k0", 0, 1, "d" * 64, "", b"x", "ed25519", trust_state_digest(store))
+        TrustStateBoundCheckpoint("k0", 0, 1, "d" * 64, None, b"x", "ed25519", trust_state_digest(store))
 
 
 def test_v2_checkpoint_round_trip_preserves_binding():
