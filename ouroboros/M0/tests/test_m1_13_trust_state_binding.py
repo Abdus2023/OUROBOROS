@@ -8,7 +8,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from ourob.signed_trust import SignedTrustError, TrustStore
 from ourob.trust import JournalTrustAnchor
 from ourob.trust_checkpoint import TrustStateBoundCheckpoint, sign_trust_state_checkpoint, trust_state_digest
-from ourob.trust_recovery import TrustRecoveryError
 from ourob.trust_lifecycle import apply_transition, sign_rotation
 
 
@@ -32,7 +31,7 @@ def test_v2_checkpoint_binds_exact_trust_state():
     anchor = JournalTrustAnchor(0, "GENESIS", "generation-a")
     checkpoint = sign_trust_state_checkpoint(key, "k0", store, anchor)
     assert checkpoint.trust_state_digest == trust_state_digest(store)
-    assert store.verify(checkpoint) .key_id == "k0"
+    assert store.verify(checkpoint).key_id == "k0"
 
 
 def test_v2_checkpoint_rejects_tampered_state_digest():
@@ -49,7 +48,7 @@ def test_v2_checkpoint_requires_generation():
     key = Ed25519PrivateKey.generate()
     store = TrustStore.genesis("k0", key.public_key())
     with pytest.raises(SignedTrustError, match="generation"):
-        TrustStateBoundCheckpoint("k0", 0, 0, "GENESIS", "", b"x", trust_state_digest(store))
+        TrustStateBoundCheckpoint("k0", 0, 0, "GENESIS", "", b"x", "ed25519", trust_state_digest(store))
 
 
 def test_v2_checkpoint_round_trip_preserves_binding():
