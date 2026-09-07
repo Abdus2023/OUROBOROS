@@ -5,6 +5,16 @@
       "name": "compileall",
       "command": ["python", "-m", "compileall", "-q", "ouroboros"],
       "required": true
+    },
+    {
+      "name": "bootstrap",
+      "command": ["python", "-c", "import sys; sys.path.insert(0, 'ouroboros/M0'); from ourob.cli import main; sys.exit(main(['--repo', '.', 'bootstrap']))"],
+      "required": true
+    },
+    {
+      "name": "tests",
+      "command": ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "ouroboros/M0/tests"],
+      "required": true
     }
   ]
 }
