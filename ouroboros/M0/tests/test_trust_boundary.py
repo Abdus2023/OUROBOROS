@@ -1,18 +1,14 @@
 import json
 
 import pytest
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ourob.generation import repository_generation
 from ourob.journal import Journal
-from ourob.signed_trust import SignedTrustError, TrustStore, sign_checkpoint
+from ourob.signed_trust import TrustStore, sign_checkpoint
 from ourob.trust import JournalTrustAnchor
-from ourob.trust_boundary import (
-    ExternalTrustAuthority,
-    TrustBoundaryError,
-    authenticate_current_repository,
-    load_external_authority,
-)
+from ourob.trust_boundary import ExternalTrustAuthority, TrustBoundaryError, authenticate_current_repository, load_external_authority
 
 
 def _repo(tmp_path):
@@ -46,7 +42,7 @@ def test_current_boundary_accepts_external_generation_bound_current_head(tmp_pat
     )
     assert recovered.active.key_id == "root"
     assert records == ()
-    assert private.public_key().public_bytes_raw() == recovered.active.public_key
+    assert private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw) == recovered.active.public_key
 
 
 def test_current_boundary_rejects_unbound_checkpoint(tmp_path):
@@ -60,9 +56,8 @@ def test_current_boundary_rejects_unbound_checkpoint(tmp_path):
 
 def test_current_boundary_rejects_checkpoint_for_old_head(tmp_path):
     root = _repo(tmp_path)
-    private, store, checkpoint, _, _ = _authority(root, tmp_path)
+    _, store, checkpoint, _, _ = _authority(root, tmp_path)
     journal = Journal(root / ".ourob" / "journal.jsonl")
-    # A current checkpoint must bind the actual head, not merely a valid prefix.
     from ourob.model import Event
     journal.append(Event("RUN_CREATED", run_id="r1", generation=repository_generation(root).id, data={"task": "x"}))
     with pytest.raises(TrustBoundaryError, match="current journal head"):
@@ -71,10 +66,7 @@ def test_current_boundary_rejects_checkpoint_for_old_head(tmp_path):
 
 def test_external_authority_loader_keeps_private_material_out_of_record(tmp_path):
     root = _repo(tmp_path)
-    private, _, checkpoint, checkpoint_path, store_path = _authority(root, tmp_path)
+    _, _, checkpoint, checkpoint_path, store_path = _authority(root, tmp_path)
     authority = load_external_authority(checkpoint_path, store_path)
     assert authority.checkpoint.signature == checkpoint.signature
     assert "private" not in json.dumps(authority.initial_store.to_record()).lower()
-    with pytest.raises(SignedTrustError):
-        authority.initial_store.verify(checkpoint, historical=False) if False else (_ for _ in ()).throw(SignedTrustError("sentinel"))
-    assert private is not None
