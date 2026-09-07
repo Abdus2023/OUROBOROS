@@ -31,6 +31,7 @@ def recover_recovery_authority(events: Iterable[Event], initial_authority: Emerg
     """Replay recovery-root lifecycle from an externally provisioned root."""
     authority = initial_authority
     seen: set[str] = set()
+    used_key_ids: set[str] = {authority.key_id}
     for event in events:
         if event.name != EventName.RECOVERY_ROOT_ROTATION_AUTHORIZED.value:
             continue
@@ -40,10 +41,13 @@ def recover_recovery_authority(events: Iterable[Event], initial_authority: Emerg
             statement = RecoveryRootTransition.from_record(event.data.get("transition"))
             if statement.binding_digest in seen:
                 raise TrustRecoveryError("recovery-root transition replay detected")
+            if statement.replacement_key_id in used_key_ids:
+                raise TrustRecoveryError("recovery-root replacement key id was already used")
             authority = apply_recovery_root_rotation(statement, authority)
         except (SignedTrustError, ValueError, TypeError) as exc:
             raise TrustRecoveryError(f"invalid authenticated recovery-root transition: {exc}") from exc
         seen.add(statement.binding_digest)
+        used_key_ids.add(statement.replacement_key_id)
     return authority
 
 
@@ -53,6 +57,7 @@ def recover_trust_store(events: Iterable[Event], initial_store: TrustStore, reco
     recovery = recovery_authority
     seen_bindings: set[str] = set()
     seen_recovery_roots: set[str] = set()
+    used_recovery_key_ids: set[str] = {recovery.key_id} if recovery is not None else set()
     for event in tuple(events):
         if event.name == EventName.RECOVERY_ROOT_ROTATION_AUTHORIZED.value:
             if event.run_id is not None or event.action_id is not None or event.generation is not None:
@@ -63,10 +68,13 @@ def recover_trust_store(events: Iterable[Event], initial_store: TrustStore, reco
                 statement = RecoveryRootTransition.from_record(event.data.get("transition"))
                 if statement.binding_digest in seen_recovery_roots:
                     raise TrustRecoveryError("recovery-root transition replay detected")
+                if statement.replacement_key_id in used_recovery_key_ids:
+                    raise TrustRecoveryError("recovery-root replacement key id was already used")
                 recovery = apply_recovery_root_rotation(statement, recovery)
             except (SignedTrustError, ValueError, TypeError) as exc:
                 raise TrustRecoveryError(f"invalid authenticated recovery-root transition: {exc}") from exc
             seen_recovery_roots.add(statement.binding_digest)
+            used_recovery_key_ids.add(statement.replacement_key_id)
         elif event.name == EventName.TRUST_TRANSITION_AUTHORIZED.value:
             if event.run_id is not None or event.action_id is not None or event.generation is not None:
                 raise TrustRecoveryError("trust transition event must not be run-scoped")
