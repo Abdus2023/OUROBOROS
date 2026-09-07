@@ -10,9 +10,11 @@ from ourob.trust import JournalTrustAnchor
 from ourob.trust_checkpoint import TrustStateBoundCheckpoint, sign_trust_state_checkpoint, trust_state_digest
 from ourob.trust_lifecycle import apply_transition, sign_rotation
 
+GEN = "a" * 64
+
 
 def _anchor() -> JournalTrustAnchor:
-    return JournalTrustAnchor(1, "d" * 64, "generation-a")
+    return JournalTrustAnchor(1, "d" * 64, GEN)
 
 
 def test_trust_state_digest_is_canonical_and_changes_with_state():
@@ -21,7 +23,6 @@ def test_trust_state_digest_is_canonical_and_changes_with_state():
     first = trust_state_digest(root)
     clone = TrustStore.from_record(root.to_record())
     assert trust_state_digest(clone) == first
-
     next_key = Ed25519PrivateKey.generate()
     rotation = sign_rotation(key, root, "k1", next_key.public_key().public_bytes_raw())
     changed = TrustStore.from_record(root.to_record())
