@@ -16,6 +16,7 @@ from typing import Any, Iterable
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
+from .model import Event, EventName
 from .recovery_of_recovery import RecoveryOfRecoveryAuthority
 from .signed_trust import ALGORITHM_ED25519, SignedTrustError, public_bytes
 
@@ -209,6 +210,11 @@ def apply_lifecycle_statement(statement: RecoveryOfRecoveryLifecycleStatement, a
     return RecoveryOfRecoveryAuthority(keys, threshold, authority.epoch + 1, authority.algorithm)
 
 
+def recovery_of_recovery_lifecycle_event(statement: RecoveryOfRecoveryLifecycleStatement) -> Event:
+    """Create the unscoped durable event carrying one authenticated transition."""
+    return Event(EventName.RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED.value, data={"lifecycle": statement.to_record()})
+
+
 def recover_recovery_of_recovery_authority(events: Iterable[Any], initial_authority: RecoveryOfRecoveryAuthority) -> RecoveryOfRecoveryAuthority:
     """Replay quorum lifecycle statements strictly in journal order.
 
@@ -220,7 +226,7 @@ def recover_recovery_of_recovery_authority(events: Iterable[Any], initial_author
     seen: set[str] = set()
     for event in events:
         name = getattr(event, "name", None)
-        if name != "RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED":
+        if name != EventName.RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED.value:
             continue
         if any(getattr(event, field, None) is not None for field in ("run_id", "action_id", "generation")):
             raise SignedTrustError("recovery quorum lifecycle event must not be run-scoped")
