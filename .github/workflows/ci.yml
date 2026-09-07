@@ -1,0 +1,195 @@
+name: OUROBOROS CI
+
+on:
+  push:
+    branches:
+      - main
+      - "arena/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ouroboros-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONHASHSEED: "0"
+  TZ: UTC
+  LC_ALL: C.UTF-8
+  LANG: C.UTF-8
+
+jobs:
+  compile:
+    name: Compile / Import
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: ouroboros/M0/pyproject.toml
+
+      - name: Install runtime and test dependencies
+        working-directory: ouroboros/M0
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]" "pytest>=9,<10"
+
+      - name: Compile runtime
+        run: python -m compileall -q ouroboros
+
+      - name: Import runtime
+        working-directory: ouroboros/M0
+        run: python -c "import ourob; import ourob.cli; import ourob.trust_recovery; import ourob.recovery_of_recovery"
+
+  conformance:
+    name: Full Conformance Tests
+    needs: compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: ouroboros/M0/pyproject.toml
+
+      - name: Install runtime and test dependencies
+        working-directory: ouroboros/M0
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]" "pytest>=9,<10"
+
+      - name: Run full test suite
+        run: |
+          set -o pipefail
+          python -m pytest -q -p no:cacheprovider ouroboros/M0/tests 2>&1 | tee conformance.log
+
+      - name: Upload conformance log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ouroboros-conformance-log-${{ github.sha }}
+          path: conformance.log
+          if-no-files-found: error
+          retention-days: 14
+
+  security-conformance:
+    name: Trust / Checkpoint / Recovery Conformance
+    needs: compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: ouroboros/M0/pyproject.toml
+
+      - name: Install runtime and test dependencies
+        working-directory: ouroboros/M0
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]" "pytest>=9,<10"
+
+      - name: Run security-sensitive conformance slice
+        run: |
+          set -o pipefail
+          python -m pytest -q -p no:cacheprovider ouroboros/M0/tests -k "trust or checkpoint or recovery" 2>&1 | tee security-conformance.log
+
+      - name: Upload security conformance log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ouroboros-security-conformance-${{ github.sha }}
+          path: security-conformance.log
+          if-no-files-found: error
+          retention-days: 14
+
+  verification-gates:
+    name: Verification Gates
+    needs: [conformance, security-conformance]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: ouroboros/M0/pyproject.toml
+
+      - name: Install runtime and test dependencies
+        working-directory: ouroboros/M0
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]" "pytest>=9,<10"
+
+      - name: Gate — compileall
+        run: python -m compileall -q ouroboros
+
+      - name: Gate — bootstrap
+        run: python -c "import sys; sys.path.insert(0, 'ouroboros/M0'); from ourob.cli import main; raise SystemExit(main(['--repo', '.', 'bootstrap']))"
+
+      - name: Gate — tests
+        run: python -m pytest -q -p no:cacheprovider ouroboros/M0/tests
+
+      - name: Emit CI verification record
+        run: |
+          python - <<'PY'
+          import json
+          import platform
+          import subprocess
+          from pathlib import Path
+
+          sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          record = {
+              "schema": "ourob.ci-verification.v1",
+              "commit": sha,
+              "python": platform.python_version(),
+              "platform": platform.platform(),
+              "gates": ["compileall", "bootstrap", "tests"],
+              "required": True,
+          }
+          Path("ci-verification.json").write_text(
+              json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload CI verification record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ouroboros-ci-verification-${{ github.sha }}
+          path: ci-verification.json
+          if-no-files-found: error
+          retention-days: 14
