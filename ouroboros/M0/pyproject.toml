@@ -19,6 +19,9 @@ ourob = "ourob.cli:main"
 where = ["."]
 include = ["ourob*"]
 
+[tool.setuptools.package-data]
+ourob = ["*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
