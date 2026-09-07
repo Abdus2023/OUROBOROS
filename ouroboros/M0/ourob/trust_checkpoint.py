@@ -8,7 +8,7 @@ from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from .journal import Journal
+from .journal import Journal, JournalIntegrityError
 from .signed_trust import ALGORITHM_ED25519, SignedCheckpoint, SignedTrustError, TrustStore, canonical_signed_bytes
 from .trust import JournalTrustAnchor
 from .trust_recovery import TrustRecoveryError, recover_trust_store
@@ -32,20 +32,11 @@ class TrustStateBoundCheckpoint(SignedCheckpoint):
         SignedCheckpoint.__post_init__(self)
         if not isinstance(self.generation, str) or not self.generation:
             raise SignedTrustError("trust-bound checkpoint requires a generation")
-        if not isinstance(self.trust_state_digest, str) or not _HEX64.fullmatch(self.trust_state_digest):
+        if not _HEX64.fullmatch(self.trust_state_digest) if isinstance(self.trust_state_digest, str) else True:
             raise SignedTrustError("trust_state_digest must be a lowercase SHA-256 hex digest")
 
     def signed_payload(self) -> dict[str, Any]:
-        return {
-            "schema": TRUST_BOUND_CHECKPOINT_SCHEMA,
-            "algorithm": self.algorithm,
-            "key_id": self.key_id,
-            "trust_epoch": self.trust_epoch,
-            "sequence": self.sequence,
-            "journal_digest": self.journal_digest,
-            "generation": self.generation,
-            "trust_state_digest": self.trust_state_digest,
-        }
+        return {"schema": TRUST_BOUND_CHECKPOINT_SCHEMA, "algorithm": self.algorithm, "key_id": self.key_id, "trust_epoch": self.trust_epoch, "sequence": self.sequence, "journal_digest": self.journal_digest, "generation": self.generation, "trust_state_digest": self.trust_state_digest}
 
     def to_record(self) -> dict[str, Any]:
         record = self.signed_payload()
@@ -66,12 +57,7 @@ class TrustStateBoundCheckpoint(SignedCheckpoint):
         return cls(record["key_id"], record["trust_epoch"], record["sequence"], record["journal_digest"], record["generation"], signature, record["algorithm"], record["trust_state_digest"])
 
 
-def sign_trust_state_checkpoint(
-    private_key: Ed25519PrivateKey,
-    key_id: str,
-    store: TrustStore,
-    anchor: JournalTrustAnchor,
-) -> TrustStateBoundCheckpoint:
+def sign_trust_state_checkpoint(private_key: Ed25519PrivateKey, key_id: str, store: TrustStore, anchor: JournalTrustAnchor) -> TrustStateBoundCheckpoint:
     """Sign a v2 checkpoint after proving the signer is the store's active key."""
     if anchor.generation is None:
         raise SignedTrustError("trust-state-bound checkpoint requires a generation-bound anchor")
@@ -80,26 +66,13 @@ def sign_trust_state_checkpoint(
     if private_key.public_key().public_bytes_raw() != store.active.public_key:
         raise SignedTrustError("checkpoint signing key does not match the current active trust key")
     state_digest = trust_state_digest(store)
-    draft = TrustStateBoundCheckpoint(
-        key_id, store.epoch, anchor.sequence, anchor.journal_digest,
-        anchor.generation, b"\0", ALGORITHM_ED25519, state_digest,
-    )
+    draft = TrustStateBoundCheckpoint(key_id, store.epoch, anchor.sequence, anchor.journal_digest, anchor.generation, b"\0", ALGORITHM_ED25519, state_digest)
     signature = private_key.sign(draft.signed_bytes())
-    return TrustStateBoundCheckpoint(
-        key_id, store.epoch, anchor.sequence, anchor.journal_digest,
-        anchor.generation, signature, ALGORITHM_ED25519, state_digest,
-    )
+    return TrustStateBoundCheckpoint(key_id, store.epoch, anchor.sequence, anchor.journal_digest, anchor.generation, signature, ALGORITHM_ED25519, state_digest)
 
 
-def issue_current_checkpoint(
-    journal: Journal,
-    initial_store: TrustStore,
-    private_key: Ed25519PrivateKey,
-    key_id: str,
-    *,
-    generation: str,
-) -> TrustStateBoundCheckpoint:
-    """Issue a checkpoint only from externally rooted, current journal state.
+def issue_current_checkpoint(journal: Journal, initial_store: TrustStore, private_key: Ed25519PrivateKey, key_id: str, *, generation: str) -> TrustStateBoundCheckpoint:
+    """Issue only from the externally rooted, fully reconstructed current state.
 
     Issuance is deliberately not a journal event: appending an issuance event
     after signing would advance the journal head and invalidate the checkpoint.
@@ -113,5 +86,7 @@ def issue_current_checkpoint(
         recovered = recover_trust_store((record.event for record in records), initial_store)
         anchor = JournalTrustAnchor(records[-1].sequence, records[-1].digest, generation)
         return sign_trust_state_checkpoint(private_key, key_id, recovered, anchor)
-    except (ValueError, TypeError, TrustRecoveryError) as exc:
+    except SignedTrustError:
+        raise
+    except (JournalIntegrityError, ValueError, TypeError, TrustRecoveryError) as exc:
         raise SignedTrustError(f"cannot issue checkpoint from invalid trust history: {exc}") from exc
