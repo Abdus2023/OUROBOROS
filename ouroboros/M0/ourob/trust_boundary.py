@@ -1,10 +1,4 @@
-"""External trust boundary for authoritative cold bootstrap (M1.9).
-
-The repository may contain signed trust-transition events and a journal, but it
-never supplies the initial trust root. An operator provisions a public
-``TrustStore`` externally and a signed checkpoint produced by an external key
-authority. M1.9 binds those facts to the *current* repository state.
-"""
+"""External trust boundary for authoritative cold bootstrap (M1.13)."""
 from __future__ import annotations
 
 import json
@@ -13,8 +7,9 @@ from pathlib import Path
 
 from .generation import repository_generation
 from .journal import Journal, JournalIntegrityError, JournalRecord
-from .signed_trust import SignedCheckpoint, SignedTrustError, TrustStore
+from .signed_trust import SignedTrustError, TrustStore
 from .trust import TrustAnchorError, verify_anchor
+from .trust_checkpoint import TRUST_BOUND_CHECKPOINT_SCHEMA, TrustStateBoundCheckpoint, trust_state_digest
 from .trust_recovery import TrustRecoveryError, recover_trust_store
 
 
@@ -27,7 +22,7 @@ class ExternalTrustAuthority:
     """Externally provisioned authority material used only for verification."""
 
     initial_store: TrustStore
-    checkpoint: SignedCheckpoint
+    checkpoint: TrustStateBoundCheckpoint
 
 
 def load_external_authority(checkpoint_path: Path, trust_store_path: Path) -> ExternalTrustAuthority:
@@ -35,7 +30,7 @@ def load_external_authority(checkpoint_path: Path, trust_store_path: Path) -> Ex
     try:
         checkpoint_raw = json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
         store_raw = json.loads(Path(trust_store_path).read_text(encoding="utf-8"))
-        checkpoint = SignedCheckpoint.from_record(checkpoint_raw)
+        checkpoint = TrustStateBoundCheckpoint.from_record(checkpoint_raw)
         store = TrustStore.from_record(store_raw)
     except (OSError, json.JSONDecodeError, ValueError, TypeError, SignedTrustError) as exc:
         raise TrustBoundaryError(f"external trust material is invalid: {exc}") from exc
@@ -48,18 +43,14 @@ def authenticate_current_repository(
     *,
     generation: str | None = None,
 ) -> tuple[TrustStore, tuple[JournalRecord, ...]]:
-    """Authenticate the complete current journal and current repository generation.
-
-    The initial trust store is the external root. Durable trust transitions are
-    replayed from the validated journal, then the signed checkpoint is checked
-    against the resulting trust state. A current-authority checkpoint must bind
-    the journal's actual current head and the current repository generation.
-    """
+    """Authenticate current trust state, journal head, and repository generation."""
     try:
         records = journal.records()
         recovered_store = recover_trust_store((record.event for record in records), authority.initial_store)
         current_generation = generation if generation is not None else repository_generation(journal.path.parent.parent).id
         checkpoint = authority.checkpoint
+        if checkpoint.signed_payload().get("schema") != TRUST_BOUND_CHECKPOINT_SCHEMA:
+            raise TrustBoundaryError("authoritative current bootstrap requires a trust-state-bound checkpoint")
         if checkpoint.generation is None:
             raise TrustBoundaryError("current bootstrap requires a generation-bound signed checkpoint")
         if checkpoint.generation != current_generation:
@@ -69,6 +60,8 @@ def authenticate_current_repository(
         expected_digest = records[-1].digest if records else "GENESIS"
         if checkpoint.journal_digest != expected_digest:
             raise TrustBoundaryError("signed checkpoint does not bind the current journal head digest")
+        if checkpoint.trust_state_digest != trust_state_digest(recovered_store):
+            raise TrustBoundaryError("signed checkpoint does not bind the reconstructed trust state")
         recovered_store.verify(checkpoint, historical=False)
         verify_anchor(checkpoint.anchor, records, current_generation)
         return recovered_store, tuple(records)
