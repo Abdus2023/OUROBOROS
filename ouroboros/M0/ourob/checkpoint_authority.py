@@ -1,18 +1,12 @@
-"""M1.18 — explicit checkpoint authority state classification.
-
-Structural validity is not authority. A checkpoint is authoritative only when
-it authenticates the current journal, generation, and reconstructed trust state
-against the externally provisioned genesis root.
-"""
+"""M1.18/M1.20 — explicit checkpoint authority state classification."""
 from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
 
-from .checkpoint_recovery import inspect_checkpoint
 from .checkpoint_store import CheckpointPublicationError, load_checkpoint
 from .journal import Journal, JournalIntegrityError
-from .signed_trust import TrustStore
+from .signed_trust import KeyState
 from .trust_boundary import ExternalTrustAuthority, TrustBoundaryError, authenticate_current_repository
 from .trust_recovery import TrustRecoveryError, recover_trust_store
 
@@ -48,7 +42,7 @@ def classify_checkpoint(
     try:
         authenticate_current_repository(
             journal,
-            ExternalTrustAuthority(authority.initial_store, checkpoint),
+            ExternalTrustAuthority(authority.initial_store, checkpoint, authority.recovery),
             generation=generation,
         )
         return CheckpointAuthorityState.CURRENT
@@ -60,14 +54,11 @@ def classify_checkpoint(
     try:
         records = journal.records()
         recovered = recover_trust_store(
-            (record.event for record in records), authority.initial_store
+            (record.event for record in records), authority.initial_store, authority.recovery
         )
         key = recovered.keys.get(checkpoint.key_id)
-        if key is not None and key.state.value == "REVOKED":
+        if key is not None and key.state is KeyState.REVOKED:
             return CheckpointAuthorityState.REVOKED
-        # Keep the recovery helper in the classification path so a malformed
-        # trust history never gets silently promoted to a semantic state.
-        inspect_checkpoint(path, journal, authority.initial_store, generation=generation)
     except (JournalIntegrityError, TrustRecoveryError, ValueError, TypeError):
         return CheckpointAuthorityState.INVALID
     return CheckpointAuthorityState.STALE
