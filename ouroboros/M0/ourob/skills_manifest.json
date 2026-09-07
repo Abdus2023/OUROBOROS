@@ -1,0 +1,20 @@
+{
+  "schema": "ourob.skills.v1",
+  "capabilities": [
+    {
+      "name": "filesystem.read",
+      "kinds": ["READ"],
+      "description": "read a repository file"
+    },
+    {
+      "name": "filesystem.search",
+      "kinds": ["SEARCH"],
+      "description": "substring search"
+    },
+    {
+      "name": "filesystem.write",
+      "kinds": ["EDIT", "WRITE"],
+      "description": "write a repository file"
+    }
+  ]
+}
