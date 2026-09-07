@@ -4,10 +4,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
-from .emergency_recovery import EmergencyRecoveryAuthority, EmergencyRecoveryStatement, RecoveryRootTransition, apply_emergency_recovery, apply_recovery_root_rotation, verify_emergency_recovery, verify_recovery_root_rotation
+from .emergency_recovery import (
+    EmergencyRecoveryAuthority,
+    EmergencyRecoveryStatement,
+    RecoveryRootTransition,
+    apply_emergency_recovery,
+    apply_recovery_root_rotation,
+    verify_emergency_recovery,
+    verify_recovery_root_rotation,
+)
 from .journal import Journal, JournalIntegrityError, JournalRecord
 from .model import Event, EventName
-from .recovery_of_recovery import RecoveryOfRecoveryAuthority, RecoveryOfRecoveryStatement, apply_recovery_of_recovery, verify_recovery_of_recovery
+from .recovery_of_recovery import (
+    RecoveryOfRecoveryAuthority,
+    RecoveryOfRecoveryStatement,
+    apply_recovery_of_recovery,
+    verify_recovery_of_recovery,
+)
 from .signed_trust import SignedTrustError, TrustStore
 from .trust_lifecycle import TrustTransition, apply_transition, verify_transition
 
@@ -37,7 +50,7 @@ def recover_recovery_authority(
     initial_authority: EmergencyRecoveryAuthority,
     recovery_of_recovery_authority: RecoveryOfRecoveryAuthority | None = None,
 ) -> EmergencyRecoveryAuthority:
-    """Replay recovery-root lifecycle from external roots, including break-glass replacement."""
+    """Replay recovery-root lifecycle strictly in journal order."""
     authority = initial_authority
     seen: set[str] = set()
     used_key_ids: set[str] = {authority.key_id}
@@ -82,40 +95,83 @@ def recover_trust_store(
     recovery_authority: EmergencyRecoveryAuthority | None = None,
     recovery_of_recovery_authority: RecoveryOfRecoveryAuthority | None = None,
 ) -> TrustStore:
-    """Replay trust state using external genesis and ordered recovery-root history."""
+    """Replay trust and recovery state as one ordered state machine.
+
+    Recovery-root changes are interleaved with trust mutations. An emergency
+    recovery event is authorized by the recovery root current at that exact
+    journal position; a later root replacement is never retroactive.
+    """
     store = TrustStore.from_record(initial_store.to_record())
+    authority = recovery_authority
     event_list = tuple(events)
-    recovery = recover_recovery_authority(event_list, recovery_authority, recovery_of_recovery_authority) if recovery_authority is not None else None
-    if recovery_authority is None and any(event.name in {EventName.RECOVERY_ROOT_ROTATION_AUTHORIZED.value, EventName.TRUST_EMERGENCY_RECOVERY_AUTHORIZED.value, EventName.RECOVERY_OF_RECOVERY_AUTHORIZED.value} for event in event_list):
-        raise TrustRecoveryError("recovery history requires an externally provisioned recovery authority")
-    seen_bindings: set[str] = set()
+    seen_trust_bindings: set[str] = set()
+    seen_recovery_bindings: set[str] = set()
+    seen_break_glass: set[str] = set()
+    used_recovery_key_ids: set[str] = {authority.key_id} if authority is not None else set()
+
     for event in event_list:
-        if event.name in {EventName.RECOVERY_ROOT_ROTATION_AUTHORIZED.value, EventName.RECOVERY_OF_RECOVERY_AUTHORIZED.value}:
-            continue
-        if event.name == EventName.TRUST_TRANSITION_AUTHORIZED.value:
+        if event.name == EventName.RECOVERY_ROOT_ROTATION_AUTHORIZED.value:
+            if authority is None:
+                raise TrustRecoveryError("recovery-root history requires an externally provisioned recovery authority")
+            if event.run_id is not None or event.action_id is not None or event.generation is not None:
+                raise TrustRecoveryError("recovery-root transition event must not be run-scoped")
+            try:
+                statement = RecoveryRootTransition.from_record(event.data.get("transition"))
+                if statement.binding_digest in seen_recovery_bindings:
+                    raise TrustRecoveryError("recovery-root transition replay detected")
+                if statement.replacement_key_id in used_recovery_key_ids:
+                    raise TrustRecoveryError("recovery-root replacement key id was already used")
+                authority = apply_recovery_root_rotation(statement, authority)
+            except (SignedTrustError, ValueError, TypeError) as exc:
+                raise TrustRecoveryError(f"invalid authenticated recovery-root transition: {exc}") from exc
+            seen_recovery_bindings.add(statement.binding_digest)
+            used_recovery_key_ids.add(statement.replacement_key_id)
+
+        elif event.name == EventName.RECOVERY_OF_RECOVERY_AUTHORIZED.value:
+            if authority is None:
+                raise TrustRecoveryError("recovery-of-recovery requires an externally provisioned recovery authority")
+            if recovery_of_recovery_authority is None:
+                raise TrustRecoveryError("recovery-of-recovery requires an externally provisioned quorum authority")
+            if event.run_id is not None or event.action_id is not None or event.generation is not None:
+                raise TrustRecoveryError("recovery-of-recovery event must not be run-scoped")
+            try:
+                statement = RecoveryOfRecoveryStatement.from_record(event.data.get("recovery"))
+                if statement.binding_digest in seen_break_glass:
+                    raise TrustRecoveryError("recovery-of-recovery replay detected")
+                if statement.replacement_key_id in used_recovery_key_ids:
+                    raise TrustRecoveryError("recovery-of-recovery replacement key id was already used")
+                authority = apply_recovery_of_recovery(statement, recovery_of_recovery_authority, authority)
+            except (SignedTrustError, ValueError, TypeError) as exc:
+                raise TrustRecoveryError(f"invalid authenticated recovery-of-recovery statement: {exc}") from exc
+            seen_break_glass.add(statement.binding_digest)
+            used_recovery_key_ids.add(statement.replacement_key_id)
+
+        elif event.name == EventName.TRUST_TRANSITION_AUTHORIZED.value:
             if event.run_id is not None or event.action_id is not None or event.generation is not None:
                 raise TrustRecoveryError("trust transition event must not be run-scoped")
             try:
                 statement = TrustTransition.from_record(event.data.get("transition"))
-                if statement.binding_digest in seen_bindings:
+                if statement.binding_digest in seen_trust_bindings:
                     raise TrustRecoveryError("trust transition replay detected")
                 apply_transition(statement, store)
             except (SignedTrustError, ValueError, TypeError) as exc:
                 raise TrustRecoveryError(f"invalid authenticated trust transition: {exc}") from exc
-            seen_bindings.add(statement.binding_digest)
+            seen_trust_bindings.add(statement.binding_digest)
+
         elif event.name == EventName.TRUST_EMERGENCY_RECOVERY_AUTHORIZED.value:
             if event.run_id is not None or event.action_id is not None or event.generation is not None:
                 raise TrustRecoveryError("emergency recovery event must not be run-scoped")
-            if recovery is None:
+            if authority is None:
                 raise TrustRecoveryError("emergency recovery requires an externally provisioned recovery authority")
             try:
                 statement = EmergencyRecoveryStatement.from_record(event.data.get("recovery"))
-                if statement.binding_digest in seen_bindings:
+                if statement.binding_digest in seen_trust_bindings:
                     raise TrustRecoveryError("emergency recovery replay detected")
-                apply_emergency_recovery(statement, store, recovery)
+                apply_emergency_recovery(statement, store, authority)
             except (SignedTrustError, ValueError, TypeError) as exc:
                 raise TrustRecoveryError(f"invalid authenticated emergency recovery: {exc}") from exc
-            seen_bindings.add(statement.binding_digest)
+            seen_trust_bindings.add(statement.binding_digest)
+
     return store
 
 
