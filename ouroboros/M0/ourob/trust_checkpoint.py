@@ -32,7 +32,7 @@ class TrustStateBoundCheckpoint(SignedCheckpoint):
         SignedCheckpoint.__post_init__(self)
         if not isinstance(self.generation, str) or not self.generation:
             raise SignedTrustError("trust-bound checkpoint requires a generation")
-        if not _HEX64.fullmatch(self.trust_state_digest) if isinstance(self.trust_state_digest, str) else True:
+        if not isinstance(self.trust_state_digest, str) or not _HEX64.fullmatch(self.trust_state_digest):
             raise SignedTrustError("trust_state_digest must be a lowercase SHA-256 hex digest")
 
     def signed_payload(self) -> dict[str, Any]:
