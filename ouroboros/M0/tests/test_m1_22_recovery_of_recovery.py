@@ -103,7 +103,7 @@ def test_replay_is_rejected(tmp_path: Path):
     journal, recovery, _, quorum, quorum_private = _fixture(tmp_path)
     statement, _ = _statement(recovery, quorum, quorum_private)
     append_authorized_recovery_of_recovery(journal, statement, recovery, quorum)
-    with pytest.raises(TrustRecoveryError, match="replay|already been used"):
+    with pytest.raises(TrustRecoveryError, match="different recovery root|replay|already been used"):
         append_authorized_recovery_of_recovery(journal, statement, recovery, quorum)
 
 
@@ -149,23 +149,16 @@ def test_recovery_and_trust_replay_are_strictly_interleaved(tmp_path: Path):
     trust_private_1 = Ed25519PrivateKey.generate()
     initial_store = TrustStore.genesis("trust-0", Ed25519PrivateKey.generate().public_key())
 
-    # Before break-glass, the old recovery root legitimately replaces trust-0.
     first = sign_emergency_recovery(
-        recovery_private,
-        recovery,
-        initial_store,
-        "trust-1",
-        trust_private_1.public_key().public_bytes_raw(),
-        reason="first recovery",
+        recovery_private, recovery, initial_store, "trust-1",
+        trust_private_1.public_key().public_bytes_raw(), reason="first recovery",
     )
     append_authorized_emergency_recovery(journal, first, initial_store, recovery, quorum)
 
-    # The independent quorum then replaces the compromised recovery root.
     break_glass, recovery_private_1 = _statement(recovery, quorum, quorum_private)
     append_authorized_recovery_of_recovery(journal, break_glass, recovery, quorum)
     current_store = recover_trust_store((r.event for r in journal.records()), initial_store, recovery, quorum)
 
-    # After break-glass, only the new recovery root may authorize the next trust replacement.
     trust_private_2 = Ed25519PrivateKey.generate()
     second = sign_emergency_recovery(
         recovery_private_1,
