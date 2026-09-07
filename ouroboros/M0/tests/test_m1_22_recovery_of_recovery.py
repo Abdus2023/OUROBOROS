@@ -4,12 +4,18 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from ourob.emergency_recovery import EmergencyRecoveryAuthority
+from ourob.emergency_recovery import EmergencyRecoveryAuthority, sign_emergency_recovery
 from ourob.journal import Journal
 from ourob.model import Event, EventName
-from ourob.recovery_of_recovery import RecoveryOfRecoveryAuthority, sign_recovery_of_recovery, verify_recovery_of_recovery, apply_recovery_of_recovery
-from ourob.signed_trust import SignedTrustError
-from ourob.trust_recovery import TrustRecoveryError, append_authorized_recovery_of_recovery, recover_recovery_authority
+from ourob.recovery_of_recovery import RecoveryOfRecoveryAuthority, sign_recovery_of_recovery, verify_recovery_of_recovery
+from ourob.signed_trust import SignedTrustError, TrustStore
+from ourob.trust_recovery import (
+    TrustRecoveryError,
+    append_authorized_emergency_recovery,
+    append_authorized_recovery_of_recovery,
+    recover_recovery_authority,
+    recover_trust_store,
+)
 
 
 def _fixture(tmp_path: Path):
@@ -122,8 +128,6 @@ def test_old_recovery_root_cannot_authorize_after_break_glass(tmp_path: Path):
     statement, replacement = _statement(recovery, quorum, quorum_private)
     append_authorized_recovery_of_recovery(journal, statement, recovery, quorum)
     current = recover_recovery_authority((r.event for r in journal.records()), recovery, quorum)
-    forged = replacement
-    # The old root private key no longer matches the authenticated current root.
     assert old_private.public_key().public_bytes_raw() != current.public_key
     with pytest.raises(SignedTrustError):
         from ourob.emergency_recovery import sign_recovery_root_rotation
@@ -137,3 +141,42 @@ def test_no_private_material_is_serialized(tmp_path: Path):
     assert "private_key" not in record
     assert "seed" not in record
     assert all("private_key" not in item and "seed" not in item for item in record["signatures"])
+
+
+def test_recovery_and_trust_replay_are_strictly_interleaved(tmp_path: Path):
+    """A later recovery-root replacement must not authorize an earlier event."""
+    journal, recovery, recovery_private, quorum, quorum_private = _fixture(tmp_path)
+    trust_private_1 = Ed25519PrivateKey.generate()
+    initial_store = TrustStore.genesis("trust-0", Ed25519PrivateKey.generate().public_key())
+
+    # Before break-glass, the old recovery root legitimately replaces trust-0.
+    first = sign_emergency_recovery(
+        recovery_private,
+        recovery,
+        initial_store,
+        "trust-1",
+        trust_private_1.public_key().public_bytes_raw(),
+        reason="first recovery",
+    )
+    append_authorized_emergency_recovery(journal, first, initial_store, recovery, quorum)
+
+    # The independent quorum then replaces the compromised recovery root.
+    break_glass, recovery_private_1 = _statement(recovery, quorum, quorum_private)
+    append_authorized_recovery_of_recovery(journal, break_glass, recovery, quorum)
+    current_store = recover_trust_store((r.event for r in journal.records()), initial_store, recovery, quorum)
+
+    # After break-glass, only the new recovery root may authorize the next trust replacement.
+    trust_private_2 = Ed25519PrivateKey.generate()
+    second = sign_emergency_recovery(
+        recovery_private_1,
+        EmergencyRecoveryAuthority.from_public_key("recovery-root-1", recovery_private_1.public_key()),
+        current_store,
+        "trust-2",
+        trust_private_2.public_key().public_bytes_raw(),
+        reason="post break-glass recovery",
+    )
+    append_authorized_emergency_recovery(journal, second, initial_store, recovery, quorum)
+
+    recovered = recover_trust_store((r.event for r in journal.records()), initial_store, recovery, quorum)
+    assert recovered.active.key_id == "trust-2"
+    assert recovered.epoch == 2
