@@ -4,11 +4,11 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from ourob.emergency_recovery import EmergencyRecoveryAuthority, RecoveryRootTransition, sign_recovery_root_rotation
+from ourob.emergency_recovery import EmergencyRecoveryAuthority, RecoveryRootTransition, sign_emergency_recovery, sign_recovery_root_rotation
 from ourob.journal import Journal
 from ourob.model import Event, EventName
-from ourob.signed_trust import SignedTrustError
-from ourob.trust_recovery import TrustRecoveryError, append_authorized_recovery_root_rotation, recover_recovery_authority
+from ourob.signed_trust import SignedTrustError, TrustStore
+from ourob.trust_recovery import TrustRecoveryError, append_authorized_emergency_recovery, append_authorized_recovery_root_rotation, recover_recovery_authority, recover_trust_store
 
 
 def _fixture(tmp_path: Path):
@@ -28,6 +28,22 @@ def test_recovery_root_rotation_advances_external_authority(tmp_path: Path):
     assert current.key_id == "recovery-root-1"
     assert current.epoch == 1
     assert current.public_key == replacement.public_key().public_bytes_raw()
+
+
+def test_new_recovery_root_authorizes_subsequent_emergency_replacement(tmp_path: Path):
+    journal, root, root_private = _fixture(tmp_path)
+    replacement_root_private = Ed25519PrivateKey.generate()
+    root_rotation = sign_recovery_root_rotation(root_private, root, "recovery-root-1", replacement_root_private.public_key().public_bytes_raw())
+    append_authorized_recovery_root_rotation(journal, root_rotation, root)
+    current_root = recover_recovery_authority((r.event for r in journal.records()), root)
+    trust_private = Ed25519PrivateKey.generate()
+    store = TrustStore.genesis("trust-0", trust_private.public_key())
+    replacement_trust_private = Ed25519PrivateKey.generate()
+    statement = sign_emergency_recovery(replacement_root_private, current_root, store, "trust-1", replacement_trust_private.public_key().public_bytes_raw(), reason="compromise")
+    append_authorized_emergency_recovery(journal, statement, store, root)
+    current_store = recover_trust_store((r.event for r in journal.records()), store, root)
+    assert current_store.active.key_id == "trust-1"
+    assert current_store.epoch == 1
 
 
 def test_old_recovery_root_cannot_authorize_after_rotation(tmp_path: Path):
