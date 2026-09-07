@@ -1,17 +1,9 @@
-"""Cold bootstrap: reconstruct the runtime from repository state (M0.9, M0.15, M0.16).
+"""Cold bootstrap and the repository trust boundary.
 
-Bootstrap is a trust boundary, not a quine. It:
-
-1. identifies the repository root and its generation (G0);
-2. loads and validates the constitution and verification gates;
-3. reconstructs the capability registry strictly from ``skills/manifest.json``,
-   enforcing provenance (every module resolves inside the repository, exports
-   ``register``, adds exactly the declared capability, and nothing else);
-4. recomputes the generation (G1) and reports ``trusted`` only when G0 == G1.
-
-A repository-stored "promoted" marker is never consulted as authority.
+M1.9 adds authoritative mode: cold-start trust also requires an externally
+provisioned TrustStore and a generation-bound signed checkpoint covering the
+current journal head. Repository state alone can never satisfy that boundary.
 """
-
 from __future__ import annotations
 
 import importlib.util
@@ -28,10 +20,11 @@ from .kernel import Kernel
 from .policy import Constitution, ConstitutionError, PolicyEngine, load_constitution
 from .promotion import PromotionAuthority
 from .skills import SkillRegistry, filesystem_skills, resolve_inside
+from .trust_boundary import ExternalTrustAuthority, TrustBoundaryError, authenticate_current_repository, load_external_authority
 from .verify import Gate, GateConfigurationError, Verifier, load_gates
 
 SKILLS_MANIFEST_SCHEMA = "ourob.skills.v1"
-PACKAGE_DIR = Path(__file__).resolve().parent            # .../ouroboros/M0/ourob
+PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_PACKAGE_PREFIX = "ouroboros/M0"
 CAPABILITY_MODULE_NAMESPACE = "ourob_capability"
 
@@ -43,7 +36,7 @@ class BootstrapError(RuntimeError):
 @dataclass(frozen=True)
 class CapabilityDeclaration:
     name: str
-    module: str  # repository-relative path to a python file
+    module: str
 
 
 @dataclass
@@ -56,14 +49,20 @@ class BootstrapResult:
     capabilities: tuple[CapabilityDeclaration, ...]
     registry: SkillRegistry
     errors: list[str] = field(default_factory=list)
+    trust_authenticated: bool = False
+    trust_required: bool = False
 
     @property
     def trusted(self) -> bool:
-        return not self.errors and self.generation_before == self.generation_after
+        return not self.errors and self.generation_before == self.generation_after and (
+            self.trust_authenticated or not self.trust_required
+        )
 
     def summary(self) -> dict[str, Any]:
         return {
             "trusted": self.trusted,
+            "trust_required": self.trust_required,
+            "trust_authenticated": self.trust_authenticated,
             "generation": self.generation_after,
             "generation_stable": self.generation_before == self.generation_after,
             "gates": [g.name for g in self.gates],
@@ -74,7 +73,6 @@ class BootstrapResult:
 
 
 def default_repo_root() -> Path:
-    """Walk up from the package until a directory containing policies/ and verification/ is found."""
     for candidate in (PACKAGE_DIR, *PACKAGE_DIR.parents):
         if (candidate / "policies" / "constitution.json").is_file() and (candidate / "verification" / "gates.json").is_file():
             return candidate
@@ -132,7 +130,7 @@ def _import_repository_module(repo_root: Path, declaration: CapabilityDeclaratio
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
-    except Exception as exc:  # noqa: BLE001 - surface as a bootstrap error
+    except Exception as exc:
         if previous is not None:
             sys.modules[module_name] = previous
         else:
@@ -156,77 +154,69 @@ def reconstruct_registry(repo_root: Path, declarations: tuple[CapabilityDeclarat
         register(registry)
         added = set(registry.names()) - before
         if added != {declaration.name}:
-            raise BootstrapError(
-                f"capability {declaration.name}: register() added {sorted(added)}, expected exactly [{declaration.name!r}]"
-            )
+            raise BootstrapError(f"capability {declaration.name}: register() added {sorted(added)}, expected exactly [{declaration.name!r}]")
     return registry
 
 
 class Bootstrap:
-    def __init__(self, repo_root: Path | None = None, package_prefix: str = DEFAULT_PACKAGE_PREFIX):
+    def __init__(self, repo_root: Path | None = None, package_prefix: str = DEFAULT_PACKAGE_PREFIX, *,
+                 trust_checkpoint: Path | None = None, trust_store: Path | None = None,
+                 require_external_trust: bool = False):
+        if (trust_checkpoint is None) != (trust_store is None):
+            raise BootstrapError("trust_checkpoint and trust_store must be supplied together")
+        if require_external_trust and trust_checkpoint is None:
+            raise BootstrapError("authoritative bootstrap requires an external checkpoint and trust store")
         self.repo_root = Path(repo_root).resolve() if repo_root else default_repo_root()
         self.package_prefix = package_prefix
+        self.trust_checkpoint = Path(trust_checkpoint).resolve() if trust_checkpoint else None
+        self.trust_store = Path(trust_store).resolve() if trust_store else None
+        self.require_external_trust = require_external_trust
 
     @property
-    def constitution_path(self) -> Path:
-        return self.repo_root / "policies" / "constitution.json"
-
+    def constitution_path(self) -> Path: return self.repo_root / "policies" / "constitution.json"
     @property
-    def gates_path(self) -> Path:
-        return self.repo_root / "verification" / "gates.json"
-
+    def gates_path(self) -> Path: return self.repo_root / "verification" / "gates.json"
     @property
-    def skills_manifest_path(self) -> Path:
-        return self.repo_root / "skills" / "manifest.json"
-
+    def skills_manifest_path(self) -> Path: return self.repo_root / "skills" / "manifest.json"
     @property
-    def journal_path(self) -> Path:
-        return self.repo_root / ".ourob" / "journal.jsonl"
+    def journal_path(self) -> Path: return self.repo_root / ".ourob" / "journal.jsonl"
+
+    def _authenticate_external_trust(self) -> bool:
+        if self.trust_checkpoint is None or self.trust_store is None:
+            return False
+        authority: ExternalTrustAuthority = load_external_authority(self.trust_checkpoint, self.trust_store)
+        authenticate_current_repository(Journal(self.journal_path), authority, generation=repository_generation(self.repo_root).id)
+        return True
 
     def cold_start(self) -> BootstrapResult:
         errors: list[str] = []
         generation_before = repository_generation(self.repo_root).id
-
+        trust_authenticated = False
         constitution: Constitution | None = None
-        try:
-            constitution = load_constitution(self.constitution_path)
-        except ConstitutionError as exc:
-            errors.append(f"constitution: {exc}")
-
+        try: constitution = load_constitution(self.constitution_path)
+        except ConstitutionError as exc: errors.append(f"constitution: {exc}")
         gates: tuple[Gate, ...] = ()
-        try:
-            gates = load_gates(self.gates_path)
-        except GateConfigurationError as exc:
-            errors.append(f"gates: {exc}")
-
+        try: gates = load_gates(self.gates_path)
+        except GateConfigurationError as exc: errors.append(f"gates: {exc}")
         capabilities: tuple[CapabilityDeclaration, ...] = ()
         registry = filesystem_skills(self.repo_root)
         try:
             capabilities = load_skills_manifest(self.skills_manifest_path)
             registry = reconstruct_registry(self.repo_root, capabilities)
-        except BootstrapError as exc:
-            errors.append(f"capabilities: {exc}")
-
+        except BootstrapError as exc: errors.append(f"capabilities: {exc}")
+        if self.trust_checkpoint is not None:
+            try: trust_authenticated = self._authenticate_external_trust()
+            except TrustBoundaryError as exc: errors.append(f"trust: {exc}")
         generation_after = repository_generation(self.repo_root).id
-        if generation_after != generation_before:
-            errors.append("generation: repository content changed during bootstrap")
-
-        if constitution is None:
-            # Provide an inert placeholder so callers can still inspect the result.
-            constitution = Constitution("invalid", "invalid", (), ())
-        return BootstrapResult(
-            self.repo_root, generation_before, generation_after, constitution, gates, capabilities, registry, errors
-        )
+        if generation_after != generation_before: errors.append("generation: repository content changed during bootstrap")
+        if constitution is None: constitution = Constitution("invalid", "invalid", (), ())
+        return BootstrapResult(self.repo_root, generation_before, generation_after, constitution, gates, capabilities,
+                               registry, errors, trust_authenticated, self.require_external_trust)
 
     def kernel(self, result: BootstrapResult | None = None, journal: Journal | None = None) -> Kernel:
         result = result or self.cold_start()
         if not result.trusted:
             raise BootstrapError("refusing to construct kernel from untrusted bootstrap: " + "; ".join(result.errors))
-        return Kernel(
-            repo_root=self.repo_root,
-            journal=journal or Journal(self.journal_path),
-            policy=PolicyEngine(result.constitution, self.package_prefix),
-            skills=result.registry,
-            verifier=Verifier(self.repo_root, result.gates),
-            promotion=PromotionAuthority(),
-        )
+        return Kernel(repo_root=self.repo_root, journal=journal or Journal(self.journal_path),
+                      policy=PolicyEngine(result.constitution, self.package_prefix), skills=result.registry,
+                      verifier=Verifier(self.repo_root, result.gates), promotion=PromotionAuthority())
