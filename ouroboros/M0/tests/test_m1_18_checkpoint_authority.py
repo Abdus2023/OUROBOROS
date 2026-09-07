@@ -4,20 +4,15 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from ourob.checkpoint_authority import (
-    CheckpointAuthorityError,
-    CheckpointAuthorityState,
-    classify_checkpoint,
-    require_current_checkpoint,
-)
+from ourob.checkpoint_authority import CheckpointAuthorityError, CheckpointAuthorityState, classify_checkpoint, require_current_checkpoint
 from ourob.checkpoint_store import publish_checkpoint
 from ourob.journal import Journal
 from ourob.model import Event
 from ourob.signed_trust import TrustStore
 from ourob.trust_boundary import ExternalTrustAuthority
 from ourob.trust_checkpoint import issue_current_checkpoint
-from ourob.trust_lifecycle import sign_rotation
-from ourob.trust_recovery import append_authorized_transition
+from ourob.trust_lifecycle import sign_revocation, sign_rotation
+from ourob.trust_recovery import append_authorized_transition, recover_trust_store
 
 GENERATION = "a" * 64
 
@@ -73,13 +68,12 @@ def test_rotation_makes_old_checkpoint_stale(tmp_path: Path):
 
 def test_revoked_signer_is_rejected_as_revoked(tmp_path: Path):
     journal, key, store, checkpoint, authority = _authority(tmp_path)
+    target = tmp_path / "current.json"
+    publish_checkpoint(checkpoint, target)
     next_key = Ed25519PrivateKey.generate()
     rotation = sign_rotation(key, store, "k1", next_key.public_key().public_bytes_raw())
     append_authorized_transition(journal, rotation, store)
-    # Reconstruct the post-rotation state and authenticate a signed checkpoint
-    # that was valid before its signer is explicitly revoked.
-    from ourob.trust_recovery import recover_trust_store
     current = recover_trust_store((record.event for record in journal.records()), store)
-    revoke = __import__("ourob.trust_lifecycle", fromlist=["sign_revocation"]).sign_revocation(next_key, current, "k0")
+    revoke = sign_revocation(next_key, current, "k0")
     append_authorized_transition(journal, revoke, store)
-    assert classify_checkpoint(journal, authority, tmp_path / "absent.json", generation=GENERATION) is CheckpointAuthorityState.ABSENT
+    assert classify_checkpoint(journal, authority, target, generation=GENERATION) is CheckpointAuthorityState.REVOKED
