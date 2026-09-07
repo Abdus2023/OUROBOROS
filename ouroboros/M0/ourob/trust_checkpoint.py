@@ -1,4 +1,4 @@
-"""M1.13/M1.14/M1.20 trust-state-bound signed checkpoints."""
+"""M1.13/M1.14/M1.20/M1.25 trust-state-bound signed checkpoints."""
 from __future__ import annotations
 
 import re
@@ -8,8 +8,10 @@ from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from .authoritative_recovery import AuthoritativeRecoveryError, recover_authoritative_state
 from .emergency_recovery import EmergencyRecoveryAuthority
 from .journal import Journal, JournalIntegrityError
+from .recovery_of_recovery import RecoveryOfRecoveryAuthority
 from .signed_trust import ALGORITHM_ED25519, SignedCheckpoint, SignedTrustError, TrustStore, canonical_signed_bytes
 from .trust import JournalTrustAnchor
 from .trust_recovery import TrustRecoveryError, recover_trust_store
@@ -80,11 +82,14 @@ def issue_current_checkpoint(
     *,
     generation: str,
     recovery_authority: EmergencyRecoveryAuthority | None = None,
+    recovery_quorum: RecoveryOfRecoveryAuthority | None = None,
 ) -> TrustStateBoundCheckpoint:
     """Issue only from the externally rooted, fully reconstructed current state.
 
-    Emergency recovery history is accepted only when its separate external
-    recovery authority is supplied. Issuance remains outside the journal.
+    When an independent recovery quorum is supplied, issuance uses the same
+    authoritative replay path as current bootstrap. This prevents checkpoint
+    issuance from silently ignoring quorum lifecycle events that the recovery
+    path would otherwise require.
     """
     if not isinstance(generation, str) or not generation:
         raise SignedTrustError("checkpoint issuance requires a non-empty generation")
@@ -92,12 +97,23 @@ def issue_current_checkpoint(
         records = journal.records()
         if not records:
             raise TrustRecoveryError("cannot issue a current checkpoint for an empty journal")
-        recovered = recover_trust_store(
-            (record.event for record in records), initial_store, recovery_authority
-        )
+        events = (record.event for record in records)
+        if recovery_quorum is not None:
+            recovered, _, _ = recover_authoritative_state(
+                events,
+                initial_store,
+                recovery_authority,
+                recovery_quorum,
+            )
+        else:
+            recovered = recover_trust_store(
+                events,
+                initial_store,
+                recovery_authority,
+            )
         anchor = JournalTrustAnchor(records[-1].sequence, records[-1].digest, generation)
         return sign_trust_state_checkpoint(private_key, key_id, recovered, anchor)
     except SignedTrustError:
         raise
-    except (JournalIntegrityError, ValueError, TypeError, TrustRecoveryError) as exc:
+    except (JournalIntegrityError, AuthoritativeRecoveryError, ValueError, TypeError, TrustRecoveryError) as exc:
         raise SignedTrustError(f"cannot issue checkpoint from invalid trust history: {exc}") from exc
