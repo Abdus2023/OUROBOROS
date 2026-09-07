@@ -26,9 +26,10 @@ def test_multiple_active_keys_rejected():
     second = copy.deepcopy(record["keys"][0])
     second["key_id"] = "k1"
     second["public_key"] = Ed25519PrivateKey.generate().public_key().public_bytes_raw().hex()
+    second["state"] = "ACTIVE"
     second["epoch"] = 1
     record["epoch"] = 1
-    record["keys"][0]["state"] = "RETIRED"
+    record["keys"][0]["epoch"] = 1
     record["keys"].append(second)
     with pytest.raises(SignedTrustError, match="exactly one ACTIVE"):
         TrustStore.from_record(record)
