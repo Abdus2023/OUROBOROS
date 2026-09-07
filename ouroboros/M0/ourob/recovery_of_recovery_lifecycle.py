@@ -146,17 +146,7 @@ def _validate_private_signers(private_keys: Iterable[tuple[str, Ed25519PrivateKe
     return signers
 
 
-def sign_lifecycle_statement(
-    private_keys: Iterable[tuple[str, Ed25519PrivateKey]],
-    authority: RecoveryOfRecoveryAuthority,
-    operation: RecoveryOfRecoveryOperation,
-    *,
-    target_key_id: str | None = None,
-    replacement_key_id: str | None = None,
-    replacement_public_key: bytes | None = None,
-    new_threshold: int | None = None,
-    reason: str,
-) -> RecoveryOfRecoveryLifecycleStatement:
+def sign_lifecycle_statement(private_keys: Iterable[tuple[str, Ed25519PrivateKey]], authority: RecoveryOfRecoveryAuthority, operation: RecoveryOfRecoveryOperation, *, target_key_id: str | None = None, replacement_key_id: str | None = None, replacement_public_key: bytes | None = None, new_threshold: int | None = None, reason: str) -> RecoveryOfRecoveryLifecycleStatement:
     """Create a quorum-signed lifecycle statement using external private keys."""
     signers = _validate_private_signers(private_keys, authority)
     draft = RecoveryOfRecoveryLifecycleStatement(operation, authority.epoch, target_key_id, replacement_key_id, None if replacement_public_key is None else bytes(replacement_public_key), new_threshold, reason, tuple(RecoveryOfRecoveryLifecycleSignature(key_id, b"\0") for key_id, _ in signers))
@@ -172,6 +162,8 @@ def _next_membership(statement: RecoveryOfRecoveryLifecycleStatement, authority:
             raise SignedTrustError("recovery quorum rotation target is unknown")
         if statement.replacement_key_id in keys:
             raise SignedTrustError("recovery quorum rotation replacement id is not fresh")
+        if statement.replacement_public_key in keys.values():
+            raise SignedTrustError("recovery quorum rotation requires new key material")
         del keys[statement.target_key_id]
         keys[statement.replacement_key_id] = statement.replacement_public_key
     elif statement.operation == RecoveryOfRecoveryOperation.REVOKE_SIGNER:
@@ -215,3 +207,26 @@ def apply_lifecycle_statement(statement: RecoveryOfRecoveryLifecycleStatement, a
     keys = _next_membership(statement, authority)
     threshold = authority.threshold if statement.new_threshold is None else statement.new_threshold
     return RecoveryOfRecoveryAuthority(keys, threshold, authority.epoch + 1, authority.algorithm)
+
+
+def recover_recovery_of_recovery_authority(events: Iterable[Any], initial_authority: RecoveryOfRecoveryAuthority) -> RecoveryOfRecoveryAuthority:
+    """Replay quorum lifecycle statements strictly in journal order.
+
+    The supplied initial authority is the external root. No event can create
+    or replace that root before its own statement is authenticated by the
+    authority current at that exact journal position.
+    """
+    authority = RecoveryOfRecoveryAuthority(dict(initial_authority.keys), initial_authority.threshold, initial_authority.epoch, initial_authority.algorithm)
+    seen: set[str] = set()
+    for event in events:
+        name = getattr(event, "name", None)
+        if name != "RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED":
+            continue
+        if any(getattr(event, field, None) is not None for field in ("run_id", "action_id", "generation")):
+            raise SignedTrustError("recovery quorum lifecycle event must not be run-scoped")
+        statement = RecoveryOfRecoveryLifecycleStatement.from_record(getattr(event, "data", {}).get("lifecycle"))
+        if statement.binding_digest in seen:
+            raise SignedTrustError("recovery quorum lifecycle replay detected")
+        authority = apply_lifecycle_statement(statement, authority)
+        seen.add(statement.binding_digest)
+    return authority
