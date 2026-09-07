@@ -1,12 +1,8 @@
-"""M1.13 trust-state-bound signed checkpoints.
-
-Version 1 checkpoints bind a journal anchor and generation. Version 2 adds the
-canonical digest of the externally-rooted, journal-reconstructed TrustStore.
-Authoritative current bootstrap requires this stronger binding.
-"""
+"""M1.13 trust-state-bound signed checkpoints."""
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
 
@@ -24,26 +20,18 @@ def trust_state_digest(store: TrustStore) -> str:
     return sha256(canonical_signed_bytes(store.to_record())).hexdigest()
 
 
+@dataclass(frozen=True)
 class TrustStateBoundCheckpoint(SignedCheckpoint):
     """Signed checkpoint whose payload commits to reconstructed trust state."""
 
-    def __init__(
-        self,
-        key_id: str,
-        trust_epoch: int,
-        sequence: int,
-        journal_digest: str,
-        generation: str,
-        signature: bytes,
-        trust_state_digest: str,
-        algorithm: str = ALGORITHM_ED25519,
-    ) -> None:
-        super().__init__(key_id, trust_epoch, sequence, journal_digest, generation, signature, algorithm)
-        if not isinstance(generation, str) or not generation:
+    trust_state_digest: str = ""
+
+    def __post_init__(self) -> None:
+        SignedCheckpoint.__post_init__(self)
+        if not isinstance(self.generation, str) or not self.generation:
             raise SignedTrustError("trust-bound checkpoint requires a generation")
-        if not isinstance(trust_state_digest, str) or not _HEX64.fullmatch(trust_state_digest):
+        if not isinstance(self.trust_state_digest, str) or not _HEX64.fullmatch(self.trust_state_digest):
             raise SignedTrustError("trust_state_digest must be a lowercase SHA-256 hex digest")
-        object.__setattr__(self, "trust_state_digest", trust_state_digest)
 
     def signed_payload(self) -> dict[str, Any]:
         return {
@@ -73,7 +61,7 @@ class TrustStateBoundCheckpoint(SignedCheckpoint):
             signature = bytes.fromhex(record["signature"])
         except (TypeError, ValueError) as exc:
             raise SignedTrustError("checkpoint signature must be hex") from exc
-        return cls(record["key_id"], record["trust_epoch"], record["sequence"], record["journal_digest"], record["generation"], signature, record["trust_state_digest"], record["algorithm"])
+        return cls(record["key_id"], record["trust_epoch"], record["sequence"], record["journal_digest"], record["generation"], signature, record["algorithm"], record["trust_state_digest"])
 
 
 def sign_trust_state_checkpoint(
@@ -93,6 +81,7 @@ def sign_trust_state_checkpoint(
         anchor.journal_digest,
         anchor.generation,
         b"\0",
+        ALGORITHM_ED25519,
         state_digest,
     )
     signature = private_key.sign(draft.signed_bytes())
@@ -103,5 +92,6 @@ def sign_trust_state_checkpoint(
         anchor.journal_digest,
         anchor.generation,
         signature,
+        ALGORITHM_ED25519,
         state_digest,
     )
