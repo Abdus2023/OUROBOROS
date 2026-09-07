@@ -1725,7 +1725,7 @@ M1.5 establishes authenticity of a journal prefix **only relative to a trust anc
 
 ### M1.6 — Signed checkpoints and trust-key lifecycle
 
-**Status: in progress — epoch binding not yet closed.**
+**Status: closed in this repository** — `trust_epoch` is part of the signed identity and `Journal.read_signed_trusted()` / `recover_from_signed_journal()` put signature verification on the actual recovery path. (Upstream note below records the state of `Agentic-Native-Stack` at the time of writing.)
 
 #### Design
 
@@ -1817,13 +1817,25 @@ Trust epoch / rotation
 Fail-closed verification
 ```
 
-#### Open defect blocking M1.6 closure
+#### Open defect blocking M1.6 closure (upstream, at time of writing)
 
 `TrustStore` rejects revoked keys and prevents ordinary use of retired keys, but **trust epoch is not yet part of the signed checkpoint identity**. Until it is, a repository could present a validly signed checkpoint from a superseded epoch.
 
 The signed layer is also still independently callable: `SignedCheckpoint` is not yet wired into `Journal.read_trusted()`, so signature verification is not yet part of the actual recovery/bootstrap path.
 
 Test execution is not claimed (no GitHub Actions runs).
+
+#### Port into `Abdus2023/OUROBOROS`
+
+The M1.4–M1.6 layers were ported to this repository with the epoch defect closed:
+
+- `journal.py` — `flock`-serialized, `fsync`'d append; `JournalDurabilityError` when `fcntl` is unavailable; `read_trusted()` and `read_signed_trusted()`.
+- `trust.py` — `JournalTrustAnchor` (schema `ourob.trust-anchor.v1`), `verify_anchor()`; the journal exposes no API to read or write its own anchor.
+- `signed_trust.py` — `SignedCheckpoint` (schema `ourob.signed-checkpoint.v1`, signed bytes cover `algorithm · key_id · trust_epoch · sequence · journal_digest · generation`), `TrustStore` with ACTIVE/RETIRED/REVOKED and one-epoch rotation, `verify_signed_anchor()` (signature is checked **before** the anchor is consulted). Ed25519 via `cryptography`; no home-grown primitives; private keys are accepted as caller-held objects and never persisted.
+- `recovery.py` — `recover_from_trusted_journal()`, `recover_from_signed_journal()`.
+- `cli.py` — `journal --anchor`, `recover --anchor / --checkpoint --trust-store`.
+- `policy.py` — `trust.py` / `signed_trust.py` classified BOOTSTRAP (elevated).
+- Tests: `test_journal_durability.py`, `test_trust.py`, `test_signed_trust.py` (28 new; 149 total, all passing locally). Includes the demonstration that a whole-history rewrite with a recomputed chain passes `journal --verify` but is refused by anchored and signed recovery.
 
 ---
 
@@ -1861,7 +1873,7 @@ Test execution is not claimed (no GitHub Actions runs).
 
 ## 15. Next Slice
 
-**M1.6 closure — trust-epoch binding.** Do not advance to M1.7 until this is closed.
+**M1.6 closure — trust-epoch binding.** *(Closed in this repository; the checklist below is retained as the acceptance criteria.)*
 
 1. Add `trust_epoch` to `SignedCheckpoint`.
 2. Include it in the canonical signed bytes.

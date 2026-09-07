@@ -7,8 +7,8 @@ The repository is simultaneously the runtime source, capability registry, policy
 ## Layout
 
 ```
-ouroboros/M0/ourob/      implementation (kernel, policy, skills, verify, evidence, promotion, bootstrap, recovery, planner, cli)
-ouroboros/M0/tests/      conformance suite (121 tests)
+ouroboros/M0/ourob/      implementation (kernel, policy, skills, verify, evidence, promotion, bootstrap, recovery, trust, signed_trust, planner, cli)
+ouroboros/M0/tests/      conformance suite (149 tests)
 policies/constitution.json   normative policy data (interpreter lives in ourob/policy.py)
 verification/gates.json      declared verification contract
 skills/manifest.json         repository-declared capabilities
@@ -27,6 +27,8 @@ docs/                        design log
 - `PromotionAuthority` accepts only integrity-checked, complete, current evidence.
 - Cold `Bootstrap` reconstructs capabilities strictly from `skills/manifest.json` and reports `trusted` only if the generation is unchanged across reconstruction.
 - `recovery` replays the journal through the fail-closed state machine: no durable event → no recovered authority.
+- Journal appends are serialized under `flock` and `fsync`'d before the lock is released (M1.4).
+- `Journal.read_trusted(anchor)` validates the chain against an anchor held **outside** the journal (M1.5); `read_signed_trusted(checkpoint, store)` additionally requires an Ed25519 signature from an externally provisioned trust store with ACTIVE/RETIRED/REVOKED key states and trust-epoch binding (M1.6). Hash-chain integrity ≠ authenticity.
 
 ## Quick start
 
@@ -38,11 +40,14 @@ python -m ourob generation                      # current repository generation
 python -m ourob run --run-id r1 --task "Add a greet capability" --add-capability greet
 python -m ourob skills --call greet --arguments '{"name":"World"}'   # → Hello, World!
 python -m ourob journal --verify
-python -m ourob recover --run r1
+python -m ourob journal --anchor > /secure/anchor.json      # store OUTSIDE the repository
+python -m ourob recover --run r1                            # chain-integrity only
+python -m ourob recover --run r1 --anchor /secure/anchor.json
+python -m ourob recover --run r1 --checkpoint cp.json --trust-store store.json   # signed
 ```
 
 `python -m ourob run` drives a plan through the full lifecycle and exits non-zero unless the run reaches `PROMOTED`. Plans targeting protected surfaces end in `BLOCKED` and the file is never written.
 
 ## Status
 
-M0 (deterministic self-hosting kernel) and M1.1–M1.3 (durable, tamper-evident, authority-preserving recovery) are implemented. See `docs/OUROBOROS_DESIGN_LOG.md` for the full invariant list and next slice (M1.4: fsync / locking / checkpointing).
+M0 (deterministic self-hosting kernel) and M1.1–M1.6 (durable, tamper-evident, externally anchored, signature-authenticated recovery) are implemented. Requires `cryptography` for M1.6. See `docs/OUROBOROS_DESIGN_LOG.md` for the invariant list and next slice (M1.7: authenticated rotation/revocation statements).

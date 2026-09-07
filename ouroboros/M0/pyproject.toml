@@ -7,6 +7,10 @@ name = "ourob-m0"
 version = "0.1.0"
 description = "Deterministic repository-native autonomous engineering runtime"
 requires-python = ">=3.11"
+dependencies = ["cryptography>=41"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
 
 [project.scripts]
 ourob = "ourob.cli:main"

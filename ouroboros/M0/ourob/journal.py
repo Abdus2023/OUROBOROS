@@ -1,22 +1,43 @@
-"""Append-only, hash-chained JSONL journal (M0.3 + M1.2).
+"""Append-only, hash-chained JSONL journal (M0.3, M1.2, M1.4, M1.5).
 
 Every record carries a monotonically increasing sequence number, the digest
 of the previous record (GENESIS for the first), a UTC timestamp, the event
 payload and its own SHA-256 digest. Reading the journal validates the whole
 chain and fails closed on any inconsistency, so recovery can distinguish an
 interrupted runtime from a modified history.
+
+Durability (M1.4): appends are serialized under an exclusive POSIX lock, the
+existing chain is re-validated while holding the lock, and the record is
+``fsync``'d before the lock is released. Platforms without ``fcntl`` fail
+closed rather than degrade silently.
+
+What the chain does *not* provide is authenticity: an attacker able to
+rewrite the whole file can recompute every digest. ``read_trusted`` (M1.5)
+and ``read_signed_trusted`` (M1.6) validate the chain against an anchor held
+outside the journal; see ``trust.py`` / ``signed_trust.py``.
 """
 
 from __future__ import annotations
 
 import json
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, Iterator
 
 from .model import Event
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .signed_trust import SignedCheckpoint, TrustStore
+    from .trust import JournalTrustAnchor
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX
+    fcntl = None  # type: ignore[assignment]
 
 JOURNAL_VERSION = "ourob.journal.v1"
 GENESIS_DIGEST = "GENESIS"
@@ -24,6 +45,10 @@ GENESIS_DIGEST = "GENESIS"
 
 class JournalIntegrityError(RuntimeError):
     pass
+
+
+class JournalDurabilityError(RuntimeError):
+    """Raised when the platform cannot provide the required append semantics."""
 
 
 @dataclass(frozen=True)
@@ -144,27 +169,73 @@ class Journal:
             return False
         return True
 
+    def head_digest(self) -> str:
+        records = self.records()
+        return records[-1].digest if records else GENESIS_DIGEST
+
+    # -- trusted reading (M1.5 / M1.6) ------------------------------------
+
+    def read_trusted(self, anchor: "JournalTrustAnchor", generation: str | None = None) -> list[JournalRecord]:
+        """Validate the chain *and* prove that the prefix ending at
+        ``anchor.sequence`` has the digest the external anchor recorded."""
+        from .trust import verify_anchor  # local import to avoid a cycle
+
+        records = self.records()
+        verify_anchor(anchor, records, generation)
+        return records
+
+    def read_signed_trusted(
+        self,
+        checkpoint: "SignedCheckpoint",
+        store: "TrustStore",
+        generation: str | None = None,
+    ) -> list[JournalRecord]:
+        """Signature-verified variant: the checkpoint must authenticate under
+        the externally provisioned trust store *before* it is used as an anchor."""
+        from .signed_trust import verify_signed_anchor
+
+        records = self.records()
+        verify_signed_anchor(checkpoint, store, records, generation)
+        return records
+
     # -- writing -----------------------------------------------------------
 
+    @property
+    def lock_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".lock")
+
+    @contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        if fcntl is None:
+            raise JournalDurabilityError("journal append requires POSIX fcntl locking; refusing to degrade")
+        with self.lock_path.open("a+b") as lock_handle:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
     def append(self, event: Event) -> JournalRecord:
-        existing = self.records()  # refuses to append after corruption
-        sequence = len(existing) + 1
-        previous = existing[-1].digest if existing else GENESIS_DIGEST
-        body = {
-            "version": JOURNAL_VERSION,
-            "sequence": sequence,
-            "previous_digest": previous,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "event": event.to_record(),
-        }
-        record = JournalRecord(
-            JOURNAL_VERSION, sequence, previous, body["timestamp"], event, record_digest(body)
-        )
-        line = canonical_json(record.to_record()).decode("utf-8") + "\n"
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(line)
-            handle.flush()
-        return record
+        with self._exclusive():
+            existing = self.records()  # validated under the lock; refuses after corruption
+            sequence = len(existing) + 1
+            previous = existing[-1].digest if existing else GENESIS_DIGEST
+            body = {
+                "version": JOURNAL_VERSION,
+                "sequence": sequence,
+                "previous_digest": previous,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event": event.to_record(),
+            }
+            record = JournalRecord(
+                JOURNAL_VERSION, sequence, previous, body["timestamp"], event, record_digest(body)
+            )
+            line = canonical_json(record.to_record()).decode("utf-8") + "\n"
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+            return record
 
     def extend(self, events: Iterable[Event]) -> None:
         for event in events:

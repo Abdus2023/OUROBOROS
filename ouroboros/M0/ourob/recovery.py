@@ -22,6 +22,8 @@ from typing import Any
 
 from .evidence import VerificationEvidence
 from .journal import Journal, JournalIntegrityError
+from .signed_trust import SignedCheckpoint, SignedTrustError, TrustStore
+from .trust import JournalTrustAnchor, TrustAnchorError
 from .model import Action, Event, EventName, Run, RunState, VerificationResult
 from .state import InvalidTransition, transition
 
@@ -239,6 +241,36 @@ def recover_from_journal(journal_path: Path, run_id: str) -> RecoveredRun:
     except JournalIntegrityError as exc:
         raise RecoveryError(f"journal integrity failure: {exc}") from exc
     return recover_run(events, run_id)
+
+
+def recover_from_trusted_journal(
+    journal_path: Path,
+    run_id: str,
+    anchor: JournalTrustAnchor,
+    generation: str | None = None,
+) -> RecoveredRun:
+    """M1.5: recover only if the journal prefix matches an external anchor."""
+    try:
+        records = Journal(journal_path).read_trusted(anchor, generation)
+    except (JournalIntegrityError, TrustAnchorError) as exc:
+        raise RecoveryError(f"journal trust failure: {exc}") from exc
+    return recover_run([r.event for r in records], run_id)
+
+
+def recover_from_signed_journal(
+    journal_path: Path,
+    run_id: str,
+    checkpoint: SignedCheckpoint,
+    store: TrustStore,
+    generation: str | None = None,
+) -> RecoveredRun:
+    """M1.6: recover only if a signed checkpoint authenticates under the
+    externally provisioned trust store and anchors the journal prefix."""
+    try:
+        records = Journal(journal_path).read_signed_trusted(checkpoint, store, generation)
+    except (JournalIntegrityError, TrustAnchorError, SignedTrustError) as exc:
+        raise RecoveryError(f"journal trust failure: {exc}") from exc
+    return recover_run([r.event for r in records], run_id)
 
 
 def list_runs(journal_path: Path) -> tuple[str, ...]:

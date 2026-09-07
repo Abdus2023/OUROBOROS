@@ -38,7 +38,7 @@ ELEVATED_CLASSES: frozenset[MutationClass] = frozenset(
 # The constitution may add protected surfaces; it may never remove these.
 BUILTIN_PROTECTED_PREFIXES: dict[MutationClass, tuple[str, ...]] = {
     MutationClass.KERNEL: ("ourob/kernel/", "ourob/kernel.py", "ourob/state.py", "ourob/model.py"),
-    MutationClass.BOOTSTRAP: ("bootstrap/", "ourob/bootstrap.py", "ourob/generation.py", "ourob/recovery.py", "ourob/journal.py"),
+    MutationClass.BOOTSTRAP: ("bootstrap/", "ourob/bootstrap.py", "ourob/generation.py", "ourob/recovery.py", "ourob/journal.py", "ourob/trust.py", "ourob/signed_trust.py"),
     MutationClass.POLICY: ("policies/", "ourob/policy.py"),
     MutationClass.VERIFIER: ("verification/", "ourob/verify.py", "ourob/evidence.py", "ourob/promotion.py"),
 }

@@ -12,7 +12,10 @@ from .generation import repository_generation
 from .journal import Journal, JournalIntegrityError
 from .model import ActionKind
 from .planner import AddCapabilityPlanner, ScriptedPlanner
-from .recovery import RecoveryError, list_runs, recover_from_journal
+from .recovery import (RecoveryError, list_runs, recover_from_journal, recover_from_signed_journal,
+                       recover_from_trusted_journal)
+from .signed_trust import SignedCheckpoint, SignedTrustError, TrustStore
+from .trust import JournalTrustAnchor, TrustAnchorError
 
 
 def _root(args: argparse.Namespace) -> Path:
@@ -44,6 +47,11 @@ def cmd_journal(args: argparse.Namespace) -> int:
     if args.verify:
         print(f"journal ok: {len(records)} records")
         return 0
+    if args.anchor:
+        # Emit an anchor for the current head so an EXTERNAL authority can store it.
+        anchor = JournalTrustAnchor.capture(records, repository_generation(_root(args)).id if args.bind_generation else None)
+        print(json.dumps(anchor.to_record()))
+        return 0
     for record in records:
         event = record.event
         print(f"{record.sequence:5d} {event.name:32s} run={event.run_id} action={event.action_id or '-'}")
@@ -57,8 +65,19 @@ def cmd_recover(args: argparse.Namespace) -> int:
             for run_id in list_runs(journal_path):
                 print(run_id)
             return 0
-        recovered = recover_from_journal(journal_path, args.run)
-    except (RecoveryError, JournalIntegrityError) as exc:
+        if args.checkpoint and args.trust_store:
+            checkpoint = SignedCheckpoint.from_record(json.loads(Path(args.checkpoint).read_text()))
+            store = TrustStore.from_record(json.loads(Path(args.trust_store).read_text()))
+            recovered = recover_from_signed_journal(journal_path, args.run, checkpoint, store)
+        elif args.anchor:
+            anchor = JournalTrustAnchor.from_record(json.loads(Path(args.anchor).read_text()))
+            recovered = recover_from_trusted_journal(journal_path, args.run, anchor)
+        elif args.checkpoint or args.trust_store:
+            print("signed recovery requires both --checkpoint and --trust-store", file=sys.stderr)
+            return 2
+        else:
+            recovered = recover_from_journal(journal_path, args.run)
+    except (RecoveryError, JournalIntegrityError, TrustAnchorError, SignedTrustError, OSError, ValueError) as exc:
         print(f"recovery refused: {exc}", file=sys.stderr)
         return 1
     print(json.dumps({
@@ -122,10 +141,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("journal", help="list or verify the journal")
     p.add_argument("--verify", action="store_true")
+    p.add_argument("--anchor", action="store_true", help="print a trust anchor for the current head (store it externally)")
+    p.add_argument("--bind-generation", action="store_true")
     p.set_defaults(func=cmd_journal)
 
     p = sub.add_parser("recover", help="recover a run from the journal")
     p.add_argument("--run")
+    p.add_argument("--anchor", help="path to an externally held trust anchor JSON (M1.5)")
+    p.add_argument("--checkpoint", help="path to a signed checkpoint JSON (M1.6)")
+    p.add_argument("--trust-store", help="path to the public trust store JSON (M1.6)")
     p.set_defaults(func=cmd_recover)
 
     p = sub.add_parser("run", help="drive a plan through the full lifecycle")
