@@ -9,7 +9,8 @@ from hashlib import sha256
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from .signed_trust import ALGORITHM_ED25519, KeyState, SignedTrustError, TrustStore
 
@@ -23,6 +24,15 @@ class TransitionOperation(StrEnum):
 
 def _canonical(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _public_key_bytes(public_key: Ed25519PublicKey | bytes | bytearray) -> bytes:
+    """Normalize an Ed25519 public key at the API boundary."""
+    if isinstance(public_key, (bytes, bytearray)):
+        return bytes(public_key)
+    if isinstance(public_key, Ed25519PublicKey):
+        return public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    raise SignedTrustError("lifecycle target public key must be Ed25519 public-key material")
 
 
 @dataclass(frozen=True)
@@ -91,9 +101,9 @@ class TrustTransition:
         return cls(operation, record["signer_key_id"], record["from_epoch"], record["to_epoch"], record["target_key_id"], target, signature, record["algorithm"])
 
 
-def sign_rotation(private_key: Ed25519PrivateKey, store: TrustStore, new_key_id: str, new_public_key: bytes) -> TrustTransition:
+def sign_rotation(private_key: Ed25519PrivateKey, store: TrustStore, new_key_id: str, new_public_key: Ed25519PublicKey | bytes | bytearray) -> TrustTransition:
     active = store.active
-    raw = bytes(new_public_key)
+    raw = _public_key_bytes(new_public_key)
     draft = TrustTransition(TransitionOperation.ROTATE, active.key_id, store.epoch, store.epoch + 1, new_key_id, raw, b"\0")
     return TrustTransition(draft.operation, draft.signer_key_id, draft.from_epoch, draft.to_epoch, draft.target_key_id, draft.target_public_key, private_key.sign(draft.signed_bytes()))
 
