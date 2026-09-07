@@ -1,9 +1,9 @@
-"""Promotion authority (M0.9, M0.17–M0.23).
+"""Promotion authority (M0.9, M0.17–M0.23, M1.10).
 
-Promotion is authorized only by an integrity-checked ``VerificationEvidence``
-whose generation, epoch and gate contract all match the current kernel state
-and the current repository. The authority does not mutate the run; it returns
-a decision that the kernel enacts.
+Promotion is authorized only by integrity-checked verification evidence. In
+an authoritative kernel, external trust authentication is also a mandatory
+precondition; verification alone cannot silently elevate a merely
+repository-derived bootstrap into current authority.
 """
 
 from __future__ import annotations
@@ -23,13 +23,20 @@ class PromotionDecision:
 
 
 class PromotionAuthority:
+    def __init__(self, *, require_trust: bool = False):
+        self.require_trust = require_trust
+
     def authorize(
         self,
         run: Run,
         evidence: VerificationEvidence | None,
         repo_root: Path,
         current_gate_set_digest: str,
+        *,
+        trust_authenticated: bool = False,
     ) -> PromotionDecision:
+        if self.require_trust and not trust_authenticated:
+            return PromotionDecision(False, "external trust authority was not authenticated")
         if run.state is not RunState.VERIFIED:
             return PromotionDecision(False, f"run is not VERIFIED: {run.state}")
         if evidence is None:
