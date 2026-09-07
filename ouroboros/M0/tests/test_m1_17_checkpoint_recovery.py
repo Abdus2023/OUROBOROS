@@ -69,17 +69,17 @@ def test_recovery_ignores_invalid_slot_if_another_is_current(tmp_path: Path):
     assert inspect_checkpoint(invalid, journal, store, generation=GENERATION).status is CheckpointCandidateStatus.INVALID
 
 
-def test_distinct_current_checkpoints_are_ambiguous(tmp_path: Path):
+def test_recovery_does_not_select_by_filename_or_mtime(tmp_path: Path):
     journal, key, store, current = _state(tmp_path)
-    # A second checkpoint with a different generation cannot authenticate as
-    # current; this also proves recovery never selects by filename or mtime.
-    other = issue_current_checkpoint(journal, store, key, "k0", generation="b" * 64)
-    first = tmp_path / "first.json"
-    second = tmp_path / "second.json"
+    stale = issue_current_checkpoint(journal, store, key, "k0", generation="b" * 64)
+    first = tmp_path / "z-last.json"
+    second = tmp_path / "a-first.json"
     publish_checkpoint(current, first)
-    publish_checkpoint(other, second)
-    with pytest.raises(CheckpointRecoveryError, match="no current checkpoint"):
-        recover_current_checkpoint((first, second), journal, store, generation=GENERATION)
+    publish_checkpoint(stale, second)
+    # The stale candidate is lexically first and deliberately published second.
+    recovered, path = recover_current_checkpoint((second, first), journal, store, generation=GENERATION)
+    assert recovered == current
+    assert path == first
 
 
 def test_rotation_stales_pre_rotation_checkpoint_and_requires_new_current(tmp_path: Path):
