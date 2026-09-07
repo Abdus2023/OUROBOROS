@@ -1,10 +1,10 @@
-"""M1.23 — checkpoint authority must share the authoritative replay path."""
+"""M1.23/M1.25 — checkpoint authority must share authoritative replay."""
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from ourob.authoritative_recovery import AuthoritativeRecoveryError, recovery_quorum_lifecycle_event
+from ourob.authoritative_recovery import recovery_quorum_lifecycle_event
 from ourob.checkpoint_authority import CheckpointAuthorityState, classify_checkpoint
 from ourob.checkpoint_recovery import CheckpointRecoveryError, recover_current_checkpoint
 from ourob.checkpoint_store import publish_checkpoint
@@ -13,7 +13,7 @@ from ourob.journal import Journal
 from ourob.model import Event
 from ourob.recovery_of_recovery import RecoveryOfRecoveryAuthority
 from ourob.recovery_of_recovery_lifecycle import RecoveryOfRecoveryOperation, sign_lifecycle_statement
-from ourob.signed_trust import TrustStore
+from ourob.signed_trust import SignedTrustError, TrustStore
 from ourob.trust_boundary import ExternalTrustAuthority
 from ourob.trust_checkpoint import issue_current_checkpoint
 
@@ -61,7 +61,10 @@ def _quorum_rotation(journal: Journal, quorum: RecoveryOfRecoveryAuthority, quor
 def test_quorum_lifecycle_requires_external_quorum_for_checkpoint_classification(tmp_path: Path):
     journal, store, trust_private, recovery, quorum, quorum_private = _fixture(tmp_path)
     _quorum_rotation(journal, quorum, quorum_private)
-    checkpoint = issue_current_checkpoint(journal, store, trust_private, "trust-0", generation=GENERATION)
+    checkpoint = issue_current_checkpoint(
+        journal, store, trust_private, "trust-0", generation=GENERATION,
+        recovery_authority=recovery, recovery_quorum=quorum,
+    )
     target = tmp_path / "checkpoint.json"
     publish_checkpoint(checkpoint, target)
 
@@ -72,10 +75,28 @@ def test_quorum_lifecycle_requires_external_quorum_for_checkpoint_classification
     assert classify_checkpoint(journal, without_quorum, target, generation=GENERATION) is CheckpointAuthorityState.INVALID
 
 
+def test_checkpoint_issuance_cannot_bypass_quorum_history(tmp_path: Path):
+    journal, store, trust_private, recovery, quorum, quorum_private = _fixture(tmp_path)
+    _quorum_rotation(journal, quorum, quorum_private)
+    rogue_private = [Ed25519PrivateKey.generate() for _ in range(3)]
+    rogue_quorum = RecoveryOfRecoveryAuthority.from_public_keys(
+        {f"q{i}": key.public_key() for i, key in enumerate(rogue_private)}, 2
+    )
+
+    with pytest.raises(SignedTrustError, match="invalid authenticated authority event|recovery-quorum"):
+        issue_current_checkpoint(
+            journal, store, trust_private, "trust-0", generation=GENERATION,
+            recovery_authority=recovery, recovery_quorum=rogue_quorum,
+        )
+
+
 def test_checkpoint_recovery_cannot_bypass_quorum_history(tmp_path: Path):
     journal, store, trust_private, recovery, quorum, quorum_private = _fixture(tmp_path)
     _quorum_rotation(journal, quorum, quorum_private)
-    checkpoint = issue_current_checkpoint(journal, store, trust_private, "trust-0", generation=GENERATION)
+    checkpoint = issue_current_checkpoint(
+        journal, store, trust_private, "trust-0", generation=GENERATION,
+        recovery_authority=recovery, recovery_quorum=quorum,
+    )
     target = tmp_path / "checkpoint.json"
     publish_checkpoint(checkpoint, target)
 
@@ -95,12 +116,13 @@ def test_checkpoint_recovery_cannot_bypass_quorum_history(tmp_path: Path):
 def test_checkpoint_authority_does_not_accept_malformed_quorum_history(tmp_path: Path):
     journal, store, trust_private, recovery, quorum, quorum_private = _fixture(tmp_path)
     _quorum_rotation(journal, quorum, quorum_private)
-    checkpoint = issue_current_checkpoint(journal, store, trust_private, "trust-0", generation=GENERATION)
+    checkpoint = issue_current_checkpoint(
+        journal, store, trust_private, "trust-0", generation=GENERATION,
+        recovery_authority=recovery, recovery_quorum=quorum,
+    )
     target = tmp_path / "checkpoint.json"
     publish_checkpoint(checkpoint, target)
 
-    # Supplying a different genesis quorum cannot replace the externally
-    # provisioned root used to authenticate the journal's lifecycle history.
     rogue_private = [Ed25519PrivateKey.generate() for _ in range(3)]
     rogue_quorum = RecoveryOfRecoveryAuthority.from_public_keys(
         {f"q{i}": key.public_key() for i, key in enumerate(rogue_private)}, 2
@@ -112,11 +134,12 @@ def test_checkpoint_authority_does_not_accept_malformed_quorum_history(tmp_path:
 def test_authoritative_replay_error_is_not_downgraded_to_stale(tmp_path: Path):
     journal, store, trust_private, recovery, quorum, quorum_private = _fixture(tmp_path)
     _quorum_rotation(journal, quorum, quorum_private)
-    checkpoint = issue_current_checkpoint(journal, store, trust_private, "trust-0", generation=GENERATION)
+    checkpoint = issue_current_checkpoint(
+        journal, store, trust_private, "trust-0", generation=GENERATION,
+        recovery_authority=recovery, recovery_quorum=quorum,
+    )
     target = tmp_path / "checkpoint.json"
     publish_checkpoint(checkpoint, target)
 
-    # The public classification surface must fail closed as INVALID when its
-    # authority history cannot be reconstructed; it must not call such history STALE.
     authority = ExternalTrustAuthority(store, checkpoint, recovery)
     assert classify_checkpoint(journal, authority, target, generation=GENERATION) is CheckpointAuthorityState.INVALID
