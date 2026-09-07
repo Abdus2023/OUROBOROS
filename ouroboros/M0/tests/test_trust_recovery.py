@@ -7,7 +7,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from ourob.journal import Journal, JournalIntegrityError
 from ourob.model import Event, EventName
 from ourob.signed_trust import KeyState, TrustStore
-from ourob.trust_lifecycle import sign_rotation, sign_revocation
+from ourob.trust_lifecycle import apply_transition, sign_rotation, sign_revocation
 from ourob.trust_recovery import (
     TrustRecoveryError,
     append_authorized_transition,
@@ -53,7 +53,7 @@ def test_revocation_is_recovered_after_authenticated_rotation():
     keys, store = authority()
     k1 = Ed25519PrivateKey.generate()
     rotation = sign_rotation(keys["k0"], store, "k1", k1.public_key())
-    store.rotate("k1", k1.public_key())
+    apply_transition(rotation, store)
     revocation = sign_revocation(k1, store, "k0")
     recovered = recover_trust_store(
         [trust_transition_event(rotation), trust_transition_event(revocation)],
