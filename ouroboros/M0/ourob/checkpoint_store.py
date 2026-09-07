@@ -14,6 +14,7 @@ import stat
 from pathlib import Path
 from typing import Final
 
+from .signed_trust import SignedTrustError
 from .trust_checkpoint import TrustStateBoundCheckpoint
 
 CHECKPOINT_FILE_MODE: Final[int] = 0o600
@@ -121,5 +122,5 @@ def load_checkpoint(path: Path) -> TrustStateBoundCheckpoint:
         return TrustStateBoundCheckpoint.from_record(record)
     except CheckpointPublicationError:
         raise
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError, SignedTrustError) as exc:
         raise CheckpointPublicationError("checkpoint file is malformed or unreadable") from exc
