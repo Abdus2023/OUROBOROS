@@ -148,9 +148,6 @@ def sign_lifecycle_statement(private_keys: Iterable[tuple[str, Ed25519PrivateKey
     """Create a quorum-signed lifecycle statement using external private keys."""
     signers = _validate_private_signers(private_keys, authority)
     draft = RecoveryOfRecoveryLifecycleStatement(operation, authority.epoch, target_key_id, replacement_key_id, None if replacement_public_key is None else bytes(replacement_public_key), new_threshold, reason, tuple(RecoveryOfRecoveryLifecycleSignature(key_id, b"\0") for key_id, _ in signers))
-    # Validate the proposed membership/threshold before signing. Signer
-    # authorization remains a verification-time concern so adversarial fixtures
-    # can demonstrate that a stale signer cannot authorize a later transition.
     _next_membership(draft, authority)
     threshold = authority.threshold if new_threshold is None else new_threshold
     next_keys = _next_membership(draft, authority)
@@ -197,6 +194,7 @@ def recover_recovery_of_recovery_authority(events: Iterable[Any], initial_author
     """Replay quorum lifecycle statements strictly in journal order."""
     authority = RecoveryOfRecoveryAuthority(dict(initial_authority.keys), initial_authority.threshold, initial_authority.epoch, initial_authority.algorithm)
     seen: set[str] = set()
+    historical_key_ids = set(authority.keys)
     for event in events:
         if getattr(event, "name", None) != EventName.RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED.value:
             continue
@@ -205,6 +203,9 @@ def recover_recovery_of_recovery_authority(events: Iterable[Any], initial_author
         statement = RecoveryOfRecoveryLifecycleStatement.from_record(getattr(event, "data", {}).get("lifecycle"))
         if statement.binding_digest in seen:
             raise SignedTrustError("recovery quorum lifecycle replay detected")
+        if statement.operation == RecoveryOfRecoveryOperation.ROTATE_SIGNER and statement.replacement_key_id in historical_key_ids:
+            raise SignedTrustError("recovery quorum lifecycle signer id was previously used")
         authority = apply_lifecycle_statement(statement, authority)
+        historical_key_ids.update(authority.keys)
         seen.add(statement.binding_digest)
     return authority
