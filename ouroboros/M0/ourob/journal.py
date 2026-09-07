@@ -1,20 +1,17 @@
-"""Append-only, hash-chained JSONL journal (M0.3, M1.2, M1.4, M1.5).
+"""Append-only, hash-chained JSONL journal (M0.3, M1.2, M1.4, M1.5, M1.6).
 
 Every record carries a monotonically increasing sequence number, the digest
-of the previous record (GENESIS for the first), a UTC timestamp, the event
-payload and its own SHA-256 digest. Reading the journal validates the whole
-chain and fails closed on any inconsistency, so recovery can distinguish an
-interrupted runtime from a modified history.
+of the previous record, a UTC timestamp, the event payload and its own
+SHA-256 digest. Reading validates the whole chain and fails closed.
 
 Durability (M1.4): appends are serialized under an exclusive POSIX lock, the
 existing chain is re-validated while holding the lock, and the record is
-``fsync``'d before the lock is released. Platforms without ``fcntl`` fail
-closed rather than degrade silently.
+fsync'd before the lock is released.
 
-What the chain does *not* provide is authenticity: an attacker able to
-rewrite the whole file can recompute every digest. ``read_trusted`` (M1.5)
-and ``read_signed_trusted`` (M1.6) validate the chain against an anchor held
-outside the journal; see ``trust.py`` / ``signed_trust.py``.
+M1.5/M1.6 add externally held trust anchors and signed checkpoints. Current
+recovery and historical audit are deliberately separate operations: current
+recovery uses ``read_signed_trusted``; historical inspection uses the
+explicit ``read_historical_signed_trusted`` operation.
 """
 
 from __future__ import annotations
@@ -135,8 +132,6 @@ class Journal:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    # -- reading -----------------------------------------------------------
-
     def records(self) -> list[JournalRecord]:
         """Read and validate the full hash chain. Fails closed on corruption."""
         if not self.path.exists():
@@ -173,13 +168,8 @@ class Journal:
         records = self.records()
         return records[-1].digest if records else GENESIS_DIGEST
 
-    # -- trusted reading (M1.5 / M1.6) ------------------------------------
-
     def read_trusted(self, anchor: "JournalTrustAnchor", generation: str | None = None) -> list[JournalRecord]:
-        """Validate the chain *and* prove that the prefix ending at
-        ``anchor.sequence`` has the digest the external anchor recorded."""
-        from .trust import verify_anchor  # local import to avoid a cycle
-
+        from .trust import verify_anchor
         records = self.records()
         verify_anchor(anchor, records, generation)
         return records
@@ -190,15 +180,27 @@ class Journal:
         store: "TrustStore",
         generation: str | None = None,
     ) -> list[JournalRecord]:
-        """Signature-verified variant: the checkpoint must authenticate under
-        the externally provisioned trust store *before* it is used as an anchor."""
+        """Current-authority path. Retired keys are never accepted here."""
         from .signed_trust import verify_signed_anchor
-
         records = self.records()
         verify_signed_anchor(checkpoint, store, records, generation)
         return records
 
-    # -- writing -----------------------------------------------------------
+    def read_historical_signed_trusted(
+        self,
+        checkpoint: "SignedCheckpoint",
+        store: "TrustStore",
+        generation: str | None = None,
+    ) -> list[JournalRecord]:
+        """Explicit historical-audit path.
+
+        This operation may accept a RETIRED key for its own historical epoch.
+        It must not be used as the current privileged recovery path.
+        """
+        from .signed_trust import verify_signed_anchor
+        records = self.records()
+        verify_signed_anchor(checkpoint, store, records, generation, historical=True)
+        return records
 
     @property
     def lock_path(self) -> Path:
@@ -217,7 +219,7 @@ class Journal:
 
     def append(self, event: Event) -> JournalRecord:
         with self._exclusive():
-            existing = self.records()  # validated under the lock; refuses after corruption
+            existing = self.records()
             sequence = len(existing) + 1
             previous = existing[-1].digest if existing else GENESIS_DIGEST
             body = {
