@@ -1,4 +1,4 @@
-"""M1.13 trust-state-bound signed checkpoints."""
+"""M1.13/M1.14 trust-state-bound signed checkpoints."""
 from __future__ import annotations
 
 import re
@@ -8,8 +8,10 @@ from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from .journal import Journal
 from .signed_trust import ALGORITHM_ED25519, SignedCheckpoint, SignedTrustError, TrustStore, canonical_signed_bytes
 from .trust import JournalTrustAnchor
+from .trust_recovery import TrustRecoveryError, recover_trust_store
 
 TRUST_BOUND_CHECKPOINT_SCHEMA = "ourob.signed-checkpoint.v2"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -70,28 +72,46 @@ def sign_trust_state_checkpoint(
     store: TrustStore,
     anchor: JournalTrustAnchor,
 ) -> TrustStateBoundCheckpoint:
-    """Sign a v2 checkpoint over the canonical current trust state and anchor."""
+    """Sign a v2 checkpoint after proving the signer is the store's active key."""
     if anchor.generation is None:
         raise SignedTrustError("trust-state-bound checkpoint requires a generation-bound anchor")
+    if key_id != store.active.key_id:
+        raise SignedTrustError("checkpoint signer must be the current active trust key")
+    if private_key.public_key().public_bytes_raw() != store.active.public_key:
+        raise SignedTrustError("checkpoint signing key does not match the current active trust key")
     state_digest = trust_state_digest(store)
     draft = TrustStateBoundCheckpoint(
-        key_id,
-        store.epoch,
-        anchor.sequence,
-        anchor.journal_digest,
-        anchor.generation,
-        b"\0",
-        ALGORITHM_ED25519,
-        state_digest,
+        key_id, store.epoch, anchor.sequence, anchor.journal_digest,
+        anchor.generation, b"\0", ALGORITHM_ED25519, state_digest,
     )
     signature = private_key.sign(draft.signed_bytes())
     return TrustStateBoundCheckpoint(
-        key_id,
-        store.epoch,
-        anchor.sequence,
-        anchor.journal_digest,
-        anchor.generation,
-        signature,
-        ALGORITHM_ED25519,
-        state_digest,
+        key_id, store.epoch, anchor.sequence, anchor.journal_digest,
+        anchor.generation, signature, ALGORITHM_ED25519, state_digest,
     )
+
+
+def issue_current_checkpoint(
+    journal: Journal,
+    initial_store: TrustStore,
+    private_key: Ed25519PrivateKey,
+    key_id: str,
+    *,
+    generation: str,
+) -> TrustStateBoundCheckpoint:
+    """Issue a checkpoint only from externally rooted, current journal state.
+
+    Issuance is deliberately not a journal event: appending an issuance event
+    after signing would advance the journal head and invalidate the checkpoint.
+    """
+    if not isinstance(generation, str) or not generation:
+        raise SignedTrustError("checkpoint issuance requires a non-empty generation")
+    try:
+        records = journal.records()
+        if not records:
+            raise TrustRecoveryError("cannot issue a current checkpoint for an empty journal")
+        recovered = recover_trust_store((record.event for record in records), initial_store)
+        anchor = JournalTrustAnchor(records[-1].sequence, records[-1].digest, generation)
+        return sign_trust_state_checkpoint(private_key, key_id, recovered, anchor)
+    except (ValueError, TypeError, TrustRecoveryError) as exc:
+        raise SignedTrustError(f"cannot issue checkpoint from invalid trust history: {exc}") from exc
