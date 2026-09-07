@@ -27,9 +27,10 @@ docs/                        design log
 - `Journal.read_trusted(anchor)` validates the chain against an anchor held **outside** the journal (M1.5); `read_signed_trusted(checkpoint, store)` additionally requires an Ed25519 signature from an externally provisioned trust store with ACTIVE/RETIRED/REVOKED key states and trust-epoch binding (M1.6).
 - `trust_lifecycle` adds M1.7 signed rotation/revocation statements. A trust-store transition is accepted only when the current ACTIVE key authorizes the exact epoch transition and target; private signing keys remain outside the repository.
 - `trust_recovery` reconstructs trust-state evolution from a separately provisioned genesis trust store and durable signed lifecycle events. The repository cannot select its own trust root or trust epoch.
+- M1.8 `append_authorized_transition()` reconstructs current trust state and verifies the next transition **while holding the journal append lock**, preventing concurrent check-then-append races from creating conflicting trust epochs.
 - Hash-chain integrity, signature authenticity, and trust-state authorization are separate gates; passing one does not imply the others.
 
-## M1.7 trust lifecycle and recovery
+## M1.7/M1.8 trust lifecycle and recovery
 
 The trust store is **not** its own root of trust. A lifecycle mutation must carry an authorization signed by the current ACTIVE key:
 
@@ -41,6 +42,9 @@ external ACTIVE key
 verify signer + current epoch + operation invariants
        │
        ▼
+append_checked() under journal lock
+       │
+       ▼
 durable TRUST_TRANSITION_AUTHORIZED event
        │
        ▼
@@ -50,9 +54,9 @@ replay from externally provisioned genesis store
        └── REVOKE → same epoch, target key REVOKED
 ```
 
-A rotation statement is bound to the current epoch, next epoch, fresh key id and complete public-key material. A revocation statement is bound to the current epoch and a non-active target. Statements are immutable and replay-resistant through signer-state and epoch checks.
-
 `recover_trust_store(events, initial_store)` treats `initial_store` as an external root and applies only authenticated lifecycle statements. It refuses run-scoped trust-transition events, duplicate statements, invalid signatures, stale/future epochs, and transitions inconsistent with the current authoritative key state.
+
+`append_authorized_transition(journal, statement, initial_store)` is the durable authorization boundary: it validates the complete existing chain, reconstructs the current trust state from the external root, verifies the proposed signed transition, and only then performs the durable append. A failed validation produces no new record.
 
 Current run recovery and historical audit remain distinct: retired keys may be used only by explicit signed-checkpoint historical verification, and revoked keys never authenticate historical checkpoints.
 
@@ -71,4 +75,4 @@ python -m ourob recover --run r1 --checkpoint cp.json --trust-store store.json
 
 ## Status
 
-M0 (deterministic self-hosting kernel), M1.1–M1.6 (durable, tamper-evident, externally anchored, signature-authenticated recovery), and M1.7 authenticated lifecycle and durable trust-state replay are implemented at source level. Requires `cryptography` for M1.6/M1.7. Execution/CI evidence must be established by the repository's declared verification gates before a release is considered verified. See `docs/OUROBOROS_DESIGN_LOG.md` for the invariant list and next hardening slices.
+M0 (deterministic self-hosting kernel), M1.1–M1.6 (durable, tamper-evident, externally anchored, signature-authenticated recovery), and M1.7/M1.8 authenticated lifecycle, durable trust-state replay, and atomic trust-transition authorization are implemented at source level. Requires `cryptography` for M1.6/M1.7. Execution/CI evidence must be established by the repository's declared verification gates before a release is considered verified. See `docs/OUROBOROS_DESIGN_LOG.md` for the invariant list and next hardening slices.
