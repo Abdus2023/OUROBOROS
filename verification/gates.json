@@ -1,0 +1,10 @@
+{
+  "schema": "ourob.gates.v1",
+  "gates": [
+    {
+      "name": "compileall",
+      "command": ["python", "-m", "compileall", "-q", "ouroboros"],
+      "required": true
+    }
+  ]
+}
