@@ -40,6 +40,9 @@ This document records the design conversation and implementation history of OURO
     - [M1.1 Durable journal recovery](#m11--durable-journal-recovery)
     - [M1.2 Tamper-evident journal](#m12--tamper-evident-journal)
     - [M1.3 Crash recovery authority boundary](#m13--crash-recovery-authority-boundary)
+    - [M1.4 Journal durability contract](#m14--journal-durability-contract)
+    - [M1.5 External journal trust anchor](#m15--external-journal-trust-anchor)
+    - [M1.6 Signed checkpoints and trust-key lifecycle](#m16--signed-checkpoints-and-trust-key-lifecycle)
 14. [Invariant Index](#14-invariant-index)
 15. [Next Slice](#15-next-slice)
 
@@ -1649,6 +1652,181 @@ ouroboros/M0/README.md
 
 ---
 
+### M1.4 — Journal durability contract
+
+Head: `d39b6c5e96592ade398c8716b95879193d3fde10` (9 commits ahead of the M1.2 journal commit, covering M1.3 + M1.4).
+
+Journal append is now serialized and fail-closed:
+
+- POSIX inter-process exclusive locking via `fcntl.flock`.
+- The existing journal is fully validated before each append.
+- Sequence number and predecessor digest are derived **while holding the lock**.
+- Record is flushed with `handle.flush()`, then `os.fsync()` is performed **before** the lock is released.
+- Blank records are treated as corruption.
+- Platforms without the required locking primitive fail closed rather than silently providing weaker concurrency semantics.
+
+The previous journal was hash-chained but only flushed to the OS; M1.4 closes that durability gap.
+
+**Tests** (`test_journal.py`): hash-chain continuity; historical tampering detection; malformed/truncated tail detection; blank-tail corruption; refusal to append after corruption; `fsync()` execution during append.
+
+**Security distinction — what the journal now provides, and what it does not:**
+
+```
+Integrity       ✓ hash chain
+Ordering        ✓ sequence + predecessor digest
+Concurrency     ✓ serialized POSIX append
+Stable storage  ✓ fsync
+Crash detection ✓ malformed/partial records fail closed
+Authenticity    ✗ not yet provided
+```
+
+A hash chain does not provide authenticity if an attacker can rewrite the entire journal and recompute every digest. The README records this boundary explicitly.
+
+No CI/test execution is claimed for this commit (no associated GitHub Actions workflow run).
+
+---
+
+### M1.5 — External journal trust anchor
+
+Documentation commit: `5737dac4fa63205de3a9bd88f6f15709a334e64f`.
+
+Moves from *"the journal has not been accidentally or internally corrupted"* to *"the recovered journal prefix is anchored to an authority outside the journal."*
+
+**Added `ouroboros/M0/ourob/trust.py`:**
+
+- `JournalTrustAnchor` — canonical anchor serialization, anchor binding digest, trusted-prefix verification, optional generation binding.
+- Fail-closed detection of: whole-history rewrites; truncation before checkpoint; checkpoint digest mismatch; generation mismatch.
+
+**Added `Journal.read_trusted(anchor)`:** ordinary journal integrity validation *plus* external checkpoint validation. The journal cannot manufacture or replace its own trust anchor.
+
+**Tests** (`test_trust.py`): anchor round-trip; valid trusted read; whole-history rewrite rejection; truncation rejection; generation-binding rejection.
+
+Confirmed present at current `main`: `VerificationEvidence.to_record()` / `from_record()`.
+
+**Security progression:**
+
+```
+M1.2  hash chain
+  ↓
+M1.3  durable authority reconstruction
+  ↓
+M1.4  crash durability + serialized append
+  ↓
+M1.5  EXTERNAL TRUST ANCHOR
+  ↓
+M1.6  signed checkpoints / key lifecycle
+```
+
+> Hash-chain integrity ≠ authenticity.
+
+M1.5 establishes authenticity of a journal prefix **only relative to a trust anchor outside the mutable journal**. It is deliberately the non-cryptographic checkpoint layer; the journal implementation does not get to declare its own anchor authoritative.
+
+---
+
+### M1.6 — Signed checkpoints and trust-key lifecycle
+
+**Status: in progress — epoch binding not yet closed.**
+
+#### Design
+
+Private signing keys never enter OUROBOROS. The architecture:
+
+```
+External Key Authority
+        │
+        │ signs
+        ▼
+Signed Checkpoint
+        │
+        ├── key_id
+        ├── algorithm
+        ├── sequence
+        ├── journal_digest
+        ├── generation
+        └── signature
+                │
+                ▼
+        Trust-Key Registry
+                │
+        ├── ACTIVE
+        ├── RETIRED
+        └── REVOKED
+                │
+                ▼
+        Recovery / Bootstrap
+```
+
+#### M1.6 invariants
+
+1. Private keys never enter repository state.
+2. A repository cannot manufacture its own trust key.
+3. REVOKED keys can never authenticate checkpoints.
+4. RETIRED keys may validate historical checkpoints but cannot authorize new checkpoints.
+5. Key rotation requires authorization by the currently trusted authority.
+6. A checkpoint signature covers the canonical checkpoint identity, not merely the digest.
+7. Algorithm identity is part of the signed envelope.
+8. Unknown algorithms fail closed.
+9. Unknown key IDs fail closed.
+10. Trust-store replacement during recovery is forbidden.
+11. Rollback to an older trust epoch is rejected.
+12. Key rotation and revocation themselves require authenticated authorization.
+
+Eventual chain:
+
+```
+repository
+   ↓
+hash-chain integrity
+   ↓
+external checkpoint
+   ↓
+cryptographic checkpoint signature
+   ↓
+authenticated key identity
+   ↓
+key lifecycle / rotation
+   ↓
+authenticated recovery
+```
+
+#### Committed (`ouroboros/M0/ourob/signed_trust.py`)
+
+- **Ed25519 signed checkpoint envelope** — signs schema version, algorithm, key ID, sequence, journal digest and generation; canonical serialization prevents ambiguous signing inputs; checkpoint binding is independently hashable.
+- **External trust-key registry** with `ACTIVE` / `RETIRED` / `REVOKED` states.
+- **Key lifecycle enforcement** — rotation requires a new key ID; rotation advances exactly one trust epoch; revoked keys fail closed; retired keys are historical-only.
+- **No private-key persistence** — OUROBOROS consumes externally provisioned public keys only; signing accepts an externally held Ed25519 private-key object.
+- **Cryptography delegated** to the `cryptography` package (declared in `pyproject.toml`); OUROBOROS does not implement Ed25519 itself and does not invent a home-grown signature algorithm.
+
+**Conformance suite** covers: round-trip verification; signed-field tampering; revocation; epoch-controlled rotation; unknown-key rejection.
+
+Current security chain:
+
+```
+Hash-chain integrity
+        ↓
+External checkpoint
+        ↓
+Ed25519 signature
+        ↓
+Authenticated key identity
+        ↓
+Key state enforcement
+        ↓
+Trust epoch / rotation
+        ↓
+Fail-closed verification
+```
+
+#### Open defect blocking M1.6 closure
+
+`TrustStore` rejects revoked keys and prevents ordinary use of retired keys, but **trust epoch is not yet part of the signed checkpoint identity**. Until it is, a repository could present a validly signed checkpoint from a superseded epoch.
+
+The signed layer is also still independently callable: `SignedCheckpoint` is not yet wired into `Journal.read_trusted()`, so signature verification is not yet part of the actual recovery/bootstrap path.
+
+Test execution is not claimed (no GitHub Actions runs).
+
+---
+
 ## 14. Invariant Index
 
 | ID | Statement |
@@ -1670,15 +1848,49 @@ ouroboros/M0/README.md
 | M0-INV-15 | Promotion MUST never derive independent authority from a mutable repository claim the runtime itself can rewrite. |
 | M0-META-01 | The verification mechanism must itself be represented in the repository and included in the bootstrap trust boundary. |
 | M1-INV-01 | No durable event → no recovered authority. |
+| M1-INV-02 | Journal append is serialized under an exclusive lock and fsync'd before the lock is released; platforms without the primitive fail closed. |
+| M1-INV-03 | Hash-chain integrity is not authenticity; a journal prefix is authentic only relative to a trust anchor outside the mutable journal. |
+| M1-INV-04 | The journal cannot manufacture or replace its own trust anchor. |
+| M1-INV-05 | Private signing keys never enter repository state; a repository cannot manufacture its own trust key. |
+| M1-INV-06 | REVOKED keys never authenticate; RETIRED keys validate only their historical epoch. |
+| M1-INV-07 | Checkpoint signatures cover the canonical checkpoint identity including algorithm and (pending) trust epoch; unknown algorithms and key IDs fail closed. |
+| M1-INV-08 | Trust-store replacement during recovery and rollback to an older trust epoch are rejected. |
+| M1-INV-09 | A repository may present a signed checkpoint, but it cannot choose which trust epoch the verifier considers authoritative. |
 
 ---
 
 ## 15. Next Slice
 
-**M1.4 — Durable journal durability semantics:**
+**M1.6 closure — trust-epoch binding.** Do not advance to M1.7 until this is closed.
 
-- atomic append / locking
-- fsync
-- crash-tail policy
-- journal checkpointing
-- protection against whole-journal rewrite attacks
+1. Add `trust_epoch` to `SignedCheckpoint`.
+2. Include it in the canonical signed bytes.
+3. Require active checkpoints to match the current trust epoch.
+4. Permit retired keys only for their historical epoch.
+5. Reject epoch rollback.
+6. Add `Journal.read_signed_trusted(...)` so signature verification is part of the real recovery/bootstrap path:
+
+   ```
+   External Trust Store
+           │
+           ▼
+   SignedCheckpoint
+           │
+           ▼
+   TrustStore.verify()
+           │
+           ▼
+   Journal.read_trusted()
+           │
+           ▼
+   Recovery / Bootstrap
+   ```
+
+7. Add conformance tests for epoch rollback and retired-key historical verification.
+8. Only then implement authenticated key rotation/revocation statements and their recovery rules.
+
+Invariant preserved throughout:
+
+> A repository can present a signed checkpoint, but it cannot choose which trust epoch the verifier considers authoritative.
+
+**After M1.6:** M1.7 — authenticated rotation/revocation events integrated into recovery; then M2 (LLM planner emitting `Plan` objects into the unchanged kernel authority boundary).
