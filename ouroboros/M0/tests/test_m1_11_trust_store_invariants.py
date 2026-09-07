@@ -1,7 +1,6 @@
 """M1.11 — adversarial trust-store state conformance."""
 
 import copy
-import dataclasses
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -54,6 +53,7 @@ def test_duplicate_epoch_rejected():
     extra = copy.deepcopy(record["keys"][0])
     extra["key_id"] = "k1"
     extra["public_key"] = k1.public_key().public_bytes_raw().hex()
+    extra["state"] = "RETIRED"
     record["keys"].append(extra)
     with pytest.raises(SignedTrustError, match="one key per epoch"):
         TrustStore.from_record(record)
