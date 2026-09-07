@@ -1,9 +1,13 @@
-"""The OUROBOROS kernel: sole mutation gateway (M0.6, M0.11, M0.13, M1.3).
+"""The OUROBOROS kernel: sole mutation gateway (M0.6, M0.11, M0.13, M1.3, M1.10).
 
 The kernel owns exactly four things: state transitions, action authorization,
 skill dispatch and promotion authorization. Every authority-bearing step is
 journaled durably *before* the in-memory run advances, so a crash never
 leaves the journal claiming less authority than the process had.
+
+M1.10 additionally carries the cold-start trust decision into the kernel:
+an authoritative kernel cannot promote unless the external trust boundary
+was authenticated during bootstrap.
 """
 
 from __future__ import annotations
@@ -43,6 +47,8 @@ class Kernel:
         skills: SkillRegistry,
         verifier: Verifier,
         promotion: PromotionAuthority | None = None,
+        *,
+        trust_authenticated: bool = False,
     ):
         self.repo_root = Path(repo_root).resolve()
         self.journal = journal
@@ -50,6 +56,7 @@ class Kernel:
         self.skills = skills
         self.verifier = verifier
         self.promotion = promotion or PromotionAuthority()
+        self.trust_authenticated = trust_authenticated
         self._evidence: dict[str, VerificationEvidence] = {}
 
     # -- helpers -----------------------------------------------------------
@@ -105,48 +112,32 @@ class Kernel:
             raise KernelError(f"action {action.id} was not part of the authorized plan")
         if action.id in run.executed_ids:
             raise KernelError(f"action {action.id} has already been executed")
-
-        # Any new action invalidates previously captured evidence.
         self._evidence.pop(run.id, None)
-
         self._emit(EventName.ACTION_PROPOSED, run, action.id, action=action.to_record())
         transition(run, RunState.EXECUTING)
-
         decision = self.policy.evaluate(action)
         if not decision.allowed:
-            self._emit(
-                EventName.POLICY_DENIED, run, action.id,
-                reason=decision.reason, mutation_class=decision.mutation_class.value,
-            )
+            self._emit(EventName.POLICY_DENIED, run, action.id, reason=decision.reason, mutation_class=decision.mutation_class.value)
             transition(run, RunState.BLOCKED)
             observation = Observation(action.id, False, run.generation, None, decision.reason)
             run.observations.append(observation)
             return ExecutionOutcome(observation, run.state, decision.reason)
-        self._emit(
-            EventName.POLICY_ALLOWED, run, action.id,
-            reason=decision.reason, mutation_class=decision.mutation_class.value,
-        )
-
+        self._emit(EventName.POLICY_ALLOWED, run, action.id, reason=decision.reason, mutation_class=decision.mutation_class.value)
         raw = self.skills.execute(action)
         new_generation = self._generation()
         observation = Observation(action.id, raw.ok, new_generation, raw.result, raw.error)
         run.actions.append(action)
         run.observations.append(observation)
-
         if not observation.ok:
             self._emit(EventName.ACTION_FAILED, run, action.id, error=observation.error or "")
             transition(run, RunState.FAILED)
             return ExecutionOutcome(observation, run.state, observation.error or "action failed")
-
         mutated = new_generation != run.generation
         run.generation = new_generation
         if mutated:
             run.verification_epoch += 1
-        self._emit(
-            EventName.ACTION_EXECUTED, run, action.id,
-            ok=True, mutated=mutated, epoch=run.verification_epoch,
-            result=observation.result if isinstance(observation.result, (str, int, float, bool, list, dict)) else None,
-        )
+        self._emit(EventName.ACTION_EXECUTED, run, action.id, ok=True, mutated=mutated, epoch=run.verification_epoch,
+                   result=observation.result if isinstance(observation.result, (str, int, float, bool, list, dict)) else None)
         transition(run, RunState.OBSERVED)
         return ExecutionOutcome(observation, run.state, "observed")
 
@@ -164,35 +155,27 @@ class Kernel:
         self._evidence.pop(run.id, None)
         current = self._generation()
         if current != run.generation:
-            # Something mutated the repository outside the kernel. Fail closed.
-            self._emit(EventName.VERIFICATION_FAILED, run, reason="out-of-band repository mutation detected",
-                       status=VerificationStatus.INVALID.value)
+            self._emit(EventName.VERIFICATION_FAILED, run, reason="out-of-band repository mutation detected", status=VerificationStatus.INVALID.value)
             transition(run, RunState.VERIFYING)
             transition(run, RunState.FAILED)
             return None
-
-        self._emit(EventName.VERIFICATION_STARTED, run, epoch=run.verification_epoch,
-                   gate_set_digest=self.verifier.gate_set_digest)
+        self._emit(EventName.VERIFICATION_STARTED, run, epoch=run.verification_epoch, gate_set_digest=self.verifier.gate_set_digest,
+                   trust_authenticated=self.trust_authenticated)
         transition(run, RunState.VERIFYING)
-
         report = self.verifier.verify(run.verification_epoch)
         for result in report.results:
             run.verifications.append(result)
             self._emit(EventName.GATE_RESULT, run, result=result.to_record())
-
         evidence = capture_evidence(run, report.results, self.verifier.gate_names, self.verifier.gate_set_digest)
         if report.generation != run.generation or not evidence.passed:
             statuses = {r.status for r in report.results}
             blocked = VerificationStatus.BLOCKED in statuses
-            self._emit(
-                EventName.VERIFICATION_FAILED, run,
-                reason="verification gates did not all pass" if not blocked else "verification blocked",
-                status=(VerificationStatus.BLOCKED if blocked else VerificationStatus.FAIL).value,
-                gates={r.gate: r.status.value for r in report.results},
-            )
+            self._emit(EventName.VERIFICATION_FAILED, run,
+                       reason="verification gates did not all pass" if not blocked else "verification blocked",
+                       status=(VerificationStatus.BLOCKED if blocked else VerificationStatus.FAIL).value,
+                       gates={r.gate: r.status.value for r in report.results})
             transition(run, RunState.BLOCKED if blocked else RunState.FAILED)
             return None
-
         self._emit(EventName.VERIFICATION_EVIDENCE_CAPTURED, run, evidence=evidence.to_record())
         self._evidence[run.id] = evidence
         transition(run, RunState.VERIFIED)
@@ -201,15 +184,15 @@ class Kernel:
     def promote(self, run: Run) -> PromotionDecision:
         self._require_state(run, RunState.VERIFIED)
         evidence = self._evidence.get(run.id)
-        decision = self.promotion.authorize(run, evidence, self.repo_root, self.verifier.gate_set_digest)
+        decision = self.promotion.authorize(run, evidence, self.repo_root, self.verifier.gate_set_digest,
+                                            trust_authenticated=self.trust_authenticated)
         if not decision.allowed:
             self._emit(EventName.PROMOTION_DENIED, run, reason=decision.reason)
             return decision
         assert evidence is not None
-        self._emit(
-            EventName.PROMOTION_AUTHORIZED, run,
-            evidence_digest=evidence.digest, gate_set_digest=evidence.gate_set_digest, epoch=evidence.epoch,
-        )
+        self._emit(EventName.PROMOTION_AUTHORIZED, run, evidence_digest=evidence.digest,
+                   gate_set_digest=evidence.gate_set_digest, epoch=evidence.epoch,
+                   trust_authenticated=self.trust_authenticated)
         transition(run, RunState.PROMOTABLE)
         self._emit(EventName.PROMOTED, run, evidence_digest=evidence.digest)
         transition(run, RunState.PROMOTED)
