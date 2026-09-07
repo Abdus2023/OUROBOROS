@@ -1,4 +1,4 @@
-"""M1.13/M1.14 trust-state-bound signed checkpoints."""
+"""M1.13/M1.14/M1.20 trust-state-bound signed checkpoints."""
 from __future__ import annotations
 
 import re
@@ -8,6 +8,7 @@ from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from .emergency_recovery import EmergencyRecoveryAuthority
 from .journal import Journal, JournalIntegrityError
 from .signed_trust import ALGORITHM_ED25519, SignedCheckpoint, SignedTrustError, TrustStore, canonical_signed_bytes
 from .trust import JournalTrustAnchor
@@ -71,11 +72,19 @@ def sign_trust_state_checkpoint(private_key: Ed25519PrivateKey, key_id: str, sto
     return TrustStateBoundCheckpoint(key_id, store.epoch, anchor.sequence, anchor.journal_digest, anchor.generation, signature, ALGORITHM_ED25519, state_digest)
 
 
-def issue_current_checkpoint(journal: Journal, initial_store: TrustStore, private_key: Ed25519PrivateKey, key_id: str, *, generation: str) -> TrustStateBoundCheckpoint:
+def issue_current_checkpoint(
+    journal: Journal,
+    initial_store: TrustStore,
+    private_key: Ed25519PrivateKey,
+    key_id: str,
+    *,
+    generation: str,
+    recovery_authority: EmergencyRecoveryAuthority | None = None,
+) -> TrustStateBoundCheckpoint:
     """Issue only from the externally rooted, fully reconstructed current state.
 
-    Issuance is deliberately not a journal event: appending an issuance event
-    after signing would advance the journal head and invalidate the checkpoint.
+    Emergency recovery history is accepted only when its separate external
+    recovery authority is supplied. Issuance remains outside the journal.
     """
     if not isinstance(generation, str) or not generation:
         raise SignedTrustError("checkpoint issuance requires a non-empty generation")
@@ -83,7 +92,9 @@ def issue_current_checkpoint(journal: Journal, initial_store: TrustStore, privat
         records = journal.records()
         if not records:
             raise TrustRecoveryError("cannot issue a current checkpoint for an empty journal")
-        recovered = recover_trust_store((record.event for record in records), initial_store)
+        recovered = recover_trust_store(
+            (record.event for record in records), initial_store, recovery_authority
+        )
         anchor = JournalTrustAnchor(records[-1].sequence, records[-1].digest, generation)
         return sign_trust_state_checkpoint(private_key, key_id, recovered, anchor)
     except SignedTrustError:
