@@ -68,6 +68,7 @@ class EventName(StrEnum):
     PROMOTED = "PROMOTED"
     TRUST_TRANSITION_AUTHORIZED = "TRUST_TRANSITION_AUTHORIZED"
     TRUST_EMERGENCY_RECOVERY_AUTHORIZED = "TRUST_EMERGENCY_RECOVERY_AUTHORIZED"
+    RECOVERY_ROOT_ROTATION_AUTHORIZED = "RECOVERY_ROOT_ROTATION_AUTHORIZED"
 
 
 @dataclass(frozen=True)
@@ -79,21 +80,13 @@ class Action:
     rationale: str = ""
 
     def to_record(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "kind": self.kind.value,
-            "skill": self.skill,
-            "arguments": dict(self.arguments),
-            "rationale": self.rationale,
-        }
+        return {"id": self.id, "kind": self.kind.value, "skill": self.skill, "arguments": dict(self.arguments), "rationale": self.rationale}
 
     @classmethod
     def from_record(cls, record: Any) -> "Action":
         if not isinstance(record, dict):
             raise ValueError("action record must be an object")
-        action_id = record.get("id")
-        skill = record.get("skill")
-        arguments = record.get("arguments", {})
+        action_id, skill, arguments = record.get("id"), record.get("skill"), record.get("arguments", {})
         if not isinstance(action_id, str) or not action_id:
             raise ValueError("action record requires a non-empty id")
         if not isinstance(skill, str) or not skill:
@@ -129,30 +122,15 @@ class VerificationResult:
     message: str = ""
 
     def to_record(self) -> dict[str, Any]:
-        return {
-            "gate": self.gate,
-            "status": self.status.value,
-            "evidence_id": self.evidence_id,
-            "generation": self.generation,
-            "epoch": self.epoch,
-            "message": self.message,
-        }
+        return {"gate": self.gate, "status": self.status.value, "evidence_id": self.evidence_id, "generation": self.generation, "epoch": self.epoch, "message": self.message}
 
     @classmethod
     def from_record(cls, record: Any) -> "VerificationResult":
         if not isinstance(record, dict):
             raise ValueError("verification result record must be an object")
-        gate = record.get("gate")
-        evidence_id = record.get("evidence_id")
-        generation = record.get("generation")
-        epoch = record.get("epoch")
-        message = record.get("message", "")
-        if not isinstance(gate, str) or not gate:
-            raise ValueError("verification result requires a gate name")
-        if not isinstance(evidence_id, str) or not evidence_id:
-            raise ValueError("verification result requires an evidence id")
-        if not isinstance(generation, str) or not generation:
-            raise ValueError("verification result requires a generation")
+        gate, evidence_id, generation, epoch, message = record.get("gate"), record.get("evidence_id"), record.get("generation"), record.get("epoch"), record.get("message", "")
+        if not isinstance(gate, str) or not gate or not isinstance(evidence_id, str) or not evidence_id or not isinstance(generation, str) or not generation:
+            raise ValueError("verification result requires gate, evidence id, and generation")
         if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
             raise ValueError("verification result epoch must be a non-negative integer")
         if not isinstance(message, str):
@@ -173,24 +151,15 @@ class Event:
     data: dict[str, Any] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "run_id": self.run_id,
-            "action_id": self.action_id,
-            "generation": self.generation,
-            "data": dict(self.data),
-        }
+        return {"name": self.name, "run_id": self.run_id, "action_id": self.action_id, "generation": self.generation, "data": dict(self.data)}
 
     @classmethod
     def from_record(cls, record: Any) -> "Event":
         if not isinstance(record, dict):
             raise ValueError("event record must be an object")
-        name = record.get("name")
-        if not isinstance(name, str) or not name:
-            raise ValueError("event record requires a name")
-        data = record.get("data", {})
-        if not isinstance(data, dict):
-            raise ValueError("event data must be an object")
+        name, data = record.get("name"), record.get("data", {})
+        if not isinstance(name, str) or not name or not isinstance(data, dict):
+            raise ValueError("event record requires a name and object data")
         for key in ("run_id", "action_id", "generation"):
             value = record.get(key)
             if value is not None and not isinstance(value, str):
@@ -201,7 +170,6 @@ class Event:
 @dataclass(frozen=True)
 class Plan:
     """A planner proposal. Plans carry no authority of their own."""
-
     task: str
     actions: tuple[Action, ...]
 
@@ -212,12 +180,9 @@ class Plan:
     def from_record(cls, record: Any) -> "Plan":
         if not isinstance(record, dict):
             raise ValueError("plan record must be an object")
-        task = record.get("task")
-        actions = record.get("actions")
-        if not isinstance(task, str) or not task:
-            raise ValueError("plan requires a task")
-        if not isinstance(actions, list):
-            raise ValueError("plan actions must be a list")
+        task, actions = record.get("task"), record.get("actions")
+        if not isinstance(task, str) or not task or not isinstance(actions, list):
+            raise ValueError("plan requires a task and action list")
         return cls(task, tuple(Action.from_record(a) for a in actions))
 
 
