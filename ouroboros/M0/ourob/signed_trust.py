@@ -56,11 +56,6 @@ class KeyState(StrEnum):
     REVOKED = "REVOKED"
 
 
-# --------------------------------------------------------------------------
-# Checkpoint envelope
-# --------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class SignedCheckpoint:
     key_id: str
@@ -78,7 +73,6 @@ class SignedCheckpoint:
             raise SignedTrustError("checkpoint trust_epoch must be a non-negative integer")
         if not isinstance(self.signature, (bytes, bytearray)) or not self.signature:
             raise SignedTrustError("checkpoint signature must be non-empty bytes")
-        # Reuse the anchor's validation for sequence/digest/generation.
         JournalTrustAnchor(self.sequence, self.journal_digest, self.generation)
 
     @property
@@ -144,22 +138,25 @@ def sign_checkpoint(
     return SignedCheckpoint(key_id, trust_epoch, anchor.sequence, anchor.journal_digest, anchor.generation, signature)
 
 
-# --------------------------------------------------------------------------
-# Trust store
-# --------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class TrustKey:
     key_id: str
     algorithm: str
-    public_key: bytes  # raw 32-byte Ed25519 public key
+    public_key: bytes
     state: KeyState
-    epoch: int  # epoch in which this key was (or is) authoritative
+    epoch: int
 
-    def verifier(self) -> Ed25519PublicKey:
+    def __post_init__(self) -> None:
+        if not isinstance(self.key_id, str) or not self.key_id:
+            raise SignedTrustError("trust key id must be non-empty")
         if self.algorithm not in SUPPORTED_ALGORITHMS:
             raise SignedTrustError(f"unsupported algorithm: {self.algorithm!r}")
+        if not isinstance(self.epoch, int) or isinstance(self.epoch, bool) or self.epoch < 0:
+            raise SignedTrustError("trust key epoch must be non-negative")
+        if len(self.public_key) != 32:
+            raise SignedTrustError("Ed25519 public key must be 32 bytes")
+
+    def verifier(self) -> Ed25519PublicKey:
         try:
             return Ed25519PublicKey.from_public_bytes(self.public_key)
         except ValueError as exc:
@@ -181,13 +178,11 @@ def public_bytes(public_key: Ed25519PublicKey) -> bytes:
 
 @dataclass
 class TrustStore:
-    """Externally provisioned trust roots. Mutations (rotate/revoke) are
-    lifecycle operations performed by the key authority, never by a run."""
+    """Externally provisioned trust roots. Lifecycle mutations are authorized
+    by the external key authority; the repository is never its own root."""
 
     keys: dict[str, TrustKey] = field(default_factory=dict)
     epoch: int = 0
-
-    # -- provisioning ------------------------------------------------------
 
     @classmethod
     def genesis(cls, key_id: str, public_key: Ed25519PublicKey | bytes) -> "TrustStore":
@@ -201,10 +196,12 @@ class TrustStore:
         actives = [k for k in self.keys.values() if k.state is KeyState.ACTIVE]
         if len(actives) != 1:
             raise SignedTrustError(f"trust store must have exactly one ACTIVE key, found {len(actives)}")
-        return actives[0]
+        active = actives[0]
+        if active.epoch != self.epoch:
+            raise SignedTrustError("ACTIVE key epoch must equal trust store epoch")
+        return active
 
     def rotate(self, new_key_id: str, public_key: Ed25519PublicKey | bytes) -> None:
-        """Retire the active key and activate a new one, advancing exactly one epoch."""
         if new_key_id in self.keys:
             raise SignedTrustError("rotation requires a fresh key id")
         current = self.active
@@ -219,18 +216,11 @@ class TrustStore:
         key = self.keys.get(key_id)
         if key is None:
             raise SignedTrustError(f"unknown key id: {key_id}")
+        if key_id == self.active.key_id:
+            raise SignedTrustError("cannot revoke the current ACTIVE key")
         self.keys[key_id] = TrustKey(key.key_id, key.algorithm, key.public_key, KeyState.REVOKED, key.epoch)
 
-    # -- verification ------------------------------------------------------
-
     def verify(self, checkpoint: SignedCheckpoint, *, historical: bool = False) -> TrustKey:
-        """Authenticate a checkpoint. Returns the key that authenticated it.
-
-        ``historical=True`` permits a RETIRED key to authenticate a checkpoint
-        from the epoch it served. It never permits REVOKED keys, never permits
-        an epoch newer than the store's, and never permits a RETIRED key to
-        vouch for any epoch other than its own.
-        """
         if checkpoint.algorithm not in SUPPORTED_ALGORITHMS:
             raise SignedTrustError(f"unsupported checkpoint algorithm: {checkpoint.algorithm!r}")
         key = self.keys.get(checkpoint.key_id)
@@ -248,15 +238,12 @@ class TrustStore:
             if not historical:
                 raise SignedTrustError(f"key {key.key_id} is RETIRED and cannot authenticate current checkpoints")
         elif checkpoint.trust_epoch != self.epoch:
-            # ACTIVE key but stale epoch claim: rollback attempt.
             raise SignedTrustError("checkpoint trust epoch is older than the current trust epoch")
         try:
             key.verifier().verify(bytes(checkpoint.signature), checkpoint.signed_bytes())
         except InvalidSignature as exc:
             raise SignedTrustError("checkpoint signature is invalid") from exc
         return key
-
-    # -- durability of the *public* store ----------------------------------
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -286,14 +273,14 @@ class TrustStore:
                 raise SignedTrustError(f"unsupported algorithm in trust store: {entry['algorithm']!r}")
             if entry["key_id"] in store.keys:
                 raise SignedTrustError("duplicate key id in trust store")
-            store.keys[entry["key_id"]] = TrustKey(entry["key_id"], entry["algorithm"], raw, state, entry["epoch"])
-        store.active  # exactly one ACTIVE key, else raise
+            key_epoch = entry["epoch"]
+            if not isinstance(key_epoch, int) or isinstance(key_epoch, bool) or key_epoch < 0 or key_epoch > epoch:
+                raise SignedTrustError("trust key epoch is outside the store epoch")
+            store.keys[entry["key_id"]] = TrustKey(entry["key_id"], entry["algorithm"], raw, state, key_epoch)
+        active = store.active
+        if active.epoch != epoch:
+            raise SignedTrustError("ACTIVE key epoch must equal trust store epoch")
         return store
-
-
-# --------------------------------------------------------------------------
-# Journal integration
-# --------------------------------------------------------------------------
 
 
 def verify_signed_anchor(
@@ -304,8 +291,7 @@ def verify_signed_anchor(
     *,
     historical: bool = False,
 ) -> TrustKey:
-    """Authenticate ``checkpoint`` under ``store`` **first**, then apply it as
-    a journal trust anchor. Signature failure means the anchor is never consulted."""
+    """Authenticate the checkpoint first, then apply it as a journal anchor."""
     key = store.verify(checkpoint, historical=historical)
     verify_anchor(checkpoint.anchor, records, generation)
     return key
