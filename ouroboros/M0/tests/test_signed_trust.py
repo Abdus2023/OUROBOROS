@@ -86,7 +86,7 @@ def test_rotation_advances_exactly_one_epoch_and_retires_old_key(authority):
     assert store.epoch == 1
     assert store.keys["k0"].state is KeyState.RETIRED and store.keys["k0"].epoch == 0
     assert store.active.key_id == "k1" and store.active.epoch == 1
-    with pytest.raises(SignedTrustError, match="fresh key id"):
+    with pytest.raises(SignedTrustError, match="target key id is not fresh"):
         apply_transition(sign_rotation(k1, store, "k1", Ed25519PrivateKey.generate().public_key()), store)
     with pytest.raises(SignedTrustError, match="new key material"):
         apply_transition(sign_rotation(k1, store, "k2", k1.public_key()), store)
