@@ -7,7 +7,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from ourob.emergency_recovery import EmergencyRecoveryAuthority, RecoveryRootTransition, sign_recovery_root_rotation
 from ourob.journal import Journal
 from ourob.model import Event, EventName
-from ourob.signed_trust import SignedTrustError, TrustStore
+from ourob.signed_trust import SignedTrustError
 from ourob.trust_recovery import TrustRecoveryError, append_authorized_recovery_root_rotation, recover_recovery_authority
 
 
@@ -74,15 +74,15 @@ def test_root_rotation_is_not_run_scoped(tmp_path: Path):
         recover_recovery_authority([event], root)
 
 
-def test_repository_cannot_create_recovery_root_without_external_genesis(tmp_path: Path):
-    journal, root, private = _fixture(tmp_path)
+def test_repository_cannot_create_recovery_root_from_tampered_event(tmp_path: Path):
+    _, root, private = _fixture(tmp_path)
     replacement = Ed25519PrivateKey.generate()
     statement = sign_recovery_root_rotation(private, root, "recovery-root-1", replacement.public_key().public_bytes_raw())
-    event = statement.to_record()
-    event["replacement_key_id"] = "attacker-root"
-    with pytest.raises(SignedTrustError):
-        RecoveryRootTransition.from_record(event)
-    assert journal.records()
+    record = statement.to_record()
+    record["replacement_key_id"] = "attacker-root"
+    event = Event(EventName.RECOVERY_ROOT_ROTATION_AUTHORIZED.value, data={"transition": record})
+    with pytest.raises(TrustRecoveryError):
+        recover_recovery_authority([event], root)
 
 
 def test_recovery_root_transition_has_no_private_material(tmp_path: Path):
