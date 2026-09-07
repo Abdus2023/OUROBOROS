@@ -109,7 +109,12 @@ def sign_recovery_root_rotation(private_key: Ed25519PrivateKey, authority: Emerg
     """Sign a recovery-root rotation from the externally known current root."""
     if private_key.public_key().public_bytes_raw() != authority.public_key:
         raise SignedTrustError("recovery-root signing key does not match external authority")
-    draft = RecoveryRootTransition(authority.key_id, authority.epoch, authority.epoch + 1, replacement_key_id, bytes(replacement_public_key), b"\0")
+    if replacement_key_id == authority.key_id:
+        raise SignedTrustError("recovery-root replacement key id must be fresh")
+    raw = bytes(replacement_public_key)
+    if raw == authority.public_key:
+        raise SignedTrustError("recovery-root replacement must use new key material")
+    draft = RecoveryRootTransition(authority.key_id, authority.epoch, authority.epoch + 1, replacement_key_id, raw, b"\0")
     return RecoveryRootTransition(draft.signer_key_id, draft.from_epoch, draft.to_epoch, draft.replacement_key_id, draft.replacement_public_key, private_key.sign(draft.signed_bytes()), draft.algorithm)
 
 
