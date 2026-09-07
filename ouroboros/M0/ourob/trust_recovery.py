@@ -4,15 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
-from .emergency_recovery import (
-    EmergencyRecoveryAuthority,
-    EmergencyRecoveryStatement,
-    RecoveryRootTransition,
-    apply_emergency_recovery,
-    apply_recovery_root_rotation,
-    verify_emergency_recovery,
-    verify_recovery_root_rotation,
-)
+from .emergency_recovery import EmergencyRecoveryAuthority, EmergencyRecoveryStatement, RecoveryRootTransition, apply_emergency_recovery, apply_recovery_root_rotation, verify_emergency_recovery, verify_recovery_root_rotation
 from .journal import Journal, JournalIntegrityError, JournalRecord
 from .model import Event, EventName
 from .signed_trust import SignedTrustError, TrustStore
@@ -35,10 +27,7 @@ def recovery_root_rotation_event(statement: RecoveryRootTransition) -> Event:
     return Event(EventName.RECOVERY_ROOT_ROTATION_AUTHORIZED.value, data={"transition": statement.to_record()})
 
 
-def recover_recovery_authority(
-    events: Iterable[Event],
-    initial_authority: EmergencyRecoveryAuthority,
-) -> EmergencyRecoveryAuthority:
+def recover_recovery_authority(events: Iterable[Event], initial_authority: EmergencyRecoveryAuthority) -> EmergencyRecoveryAuthority:
     """Replay recovery-root lifecycle from an externally provisioned root."""
     authority = initial_authority
     seen: set[str] = set()
@@ -51,7 +40,6 @@ def recover_recovery_authority(
             statement = RecoveryRootTransition.from_record(event.data.get("transition"))
             if statement.binding_digest in seen:
                 raise TrustRecoveryError("recovery-root transition replay detected")
-            verify_recovery_root_rotation(statement, authority)
             authority = apply_recovery_root_rotation(statement, authority)
         except (SignedTrustError, ValueError, TypeError) as exc:
             raise TrustRecoveryError(f"invalid authenticated recovery-root transition: {exc}") from exc
@@ -59,18 +47,13 @@ def recover_recovery_authority(
     return authority
 
 
-def recover_trust_store(
-    events: Iterable[Event],
-    initial_store: TrustStore,
-    recovery_authority: EmergencyRecoveryAuthority | None = None,
-) -> TrustStore:
-    """Replay trust state using external genesis and the ordered recovery-root history."""
-    event_list = tuple(events)
+def recover_trust_store(events: Iterable[Event], initial_store: TrustStore, recovery_authority: EmergencyRecoveryAuthority | None = None) -> TrustStore:
+    """Replay trust state using external genesis and ordered recovery-root history."""
     store = TrustStore.from_record(initial_store.to_record())
     recovery = recovery_authority
     seen_bindings: set[str] = set()
     seen_recovery_roots: set[str] = set()
-    for event in event_list:
+    for event in tuple(events):
         if event.name == EventName.RECOVERY_ROOT_ROTATION_AUTHORIZED.value:
             if event.run_id is not None or event.action_id is not None or event.generation is not None:
                 raise TrustRecoveryError("recovery-root transition event must not be run-scoped")
@@ -119,11 +102,11 @@ def recover_trust_store_from_journal(journal_path: Path, initial_store: TrustSto
     return recover_trust_store(events, initial_store, recovery_authority)
 
 
-def append_authorized_transition(journal: Journal, statement: TrustTransition, initial_store: TrustStore) -> JournalRecord:
+def append_authorized_transition(journal: Journal, statement: TrustTransition, initial_store: TrustStore, recovery_authority: EmergencyRecoveryAuthority | None = None) -> JournalRecord:
     event = trust_transition_event(statement)
     def validate(existing: list[JournalRecord]) -> None:
         try:
-            current = recover_trust_store((record.event for record in existing), initial_store)
+            current = recover_trust_store((record.event for record in existing), initial_store, recovery_authority)
             verify_transition(statement, current)
             if any(record.event.name == EventName.TRUST_TRANSITION_AUTHORIZED.value and record.event.data.get("transition") == statement.to_record() for record in existing):
                 raise TrustRecoveryError("trust transition replay detected")
