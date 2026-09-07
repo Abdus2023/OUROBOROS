@@ -1,10 +1,11 @@
-"""External trust boundary for authoritative cold bootstrap (M1.13)."""
+"""External trust boundary for authoritative cold bootstrap (M1.13+)."""
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .emergency_recovery import EmergencyRecoveryAuthority
 from .generation import repository_generation
 from .journal import Journal, JournalIntegrityError, JournalRecord
 from .signed_trust import SignedTrustError, TrustStore
@@ -23,9 +24,14 @@ class ExternalTrustAuthority:
 
     initial_store: TrustStore
     checkpoint: TrustStateBoundCheckpoint
+    recovery: EmergencyRecoveryAuthority | None = None
 
 
-def load_external_authority(checkpoint_path: Path, trust_store_path: Path) -> ExternalTrustAuthority:
+def load_external_authority(
+    checkpoint_path: Path,
+    trust_store_path: Path,
+    recovery: EmergencyRecoveryAuthority | None = None,
+) -> ExternalTrustAuthority:
     """Load public authority material from externally supplied paths."""
     try:
         checkpoint_raw = json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
@@ -34,7 +40,7 @@ def load_external_authority(checkpoint_path: Path, trust_store_path: Path) -> Ex
         store = TrustStore.from_record(store_raw)
     except (OSError, json.JSONDecodeError, ValueError, TypeError, SignedTrustError) as exc:
         raise TrustBoundaryError(f"external trust material is invalid: {exc}") from exc
-    return ExternalTrustAuthority(store, checkpoint)
+    return ExternalTrustAuthority(store, checkpoint, recovery)
 
 
 def authenticate_current_repository(
@@ -43,10 +49,12 @@ def authenticate_current_repository(
     *,
     generation: str | None = None,
 ) -> tuple[TrustStore, tuple[JournalRecord, ...]]:
-    """Authenticate current trust state, journal head, and repository generation."""
+    """Authenticate current trust state, journal head, generation, and recovery history."""
     try:
         records = journal.records()
-        recovered_store = recover_trust_store((record.event for record in records), authority.initial_store)
+        recovered_store = recover_trust_store(
+            (record.event for record in records), authority.initial_store, authority.recovery
+        )
         current_generation = generation if generation is not None else repository_generation(journal.path.parent.parent).id
         checkpoint = authority.checkpoint
         if checkpoint.signed_payload().get("schema") != TRUST_BOUND_CHECKPOINT_SCHEMA:
@@ -75,9 +83,10 @@ def authenticate_current_paths(
     trust_store_path: Path,
     *,
     repo_root: Path,
+    recovery: EmergencyRecoveryAuthority | None = None,
 ) -> TrustStore:
     """Authenticate current authority from externally supplied public files."""
-    authority = load_external_authority(checkpoint_path, trust_store_path)
+    authority = load_external_authority(checkpoint_path, trust_store_path, recovery)
     generation = repository_generation(repo_root).id
     store, _ = authenticate_current_repository(Journal(journal_path), authority, generation=generation)
     return store
