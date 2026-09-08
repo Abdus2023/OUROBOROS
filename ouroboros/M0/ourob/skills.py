@@ -1,9 +1,4 @@
-"""Skill registry and built-in filesystem capabilities (M0.5).
-
-Skills are the only components that touch the filesystem. They are never
-invoked directly by a planner: the kernel dispatches an already policy-
-evaluated ``Action`` to the registry.
-"""
+"""Skill registry and built-in filesystem capabilities (M0.5)."""
 
 from __future__ import annotations
 
@@ -14,8 +9,11 @@ from typing import Any, Callable, Mapping
 
 from .model import Action, ActionKind, Observation
 
-
 SKILLS_MANIFEST_SCHEMA = "ourob.skills.v1"
+DEFAULT_MAX_SEARCH_FILES = 4096
+DEFAULT_MAX_SEARCH_BYTES = 16 * 1024 * 1024
+DEFAULT_MAX_SEARCH_HITS = 4096
+DEFAULT_MAX_FILE_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -79,13 +77,11 @@ def _manifest_records(manifest: Mapping[str, Any]) -> dict[str, tuple[frozenset[
     capabilities = manifest.get("capabilities")
     if not isinstance(capabilities, list):
         raise SkillManifestError("skill manifest capabilities must be a list")
-
     records: dict[str, tuple[frozenset[ActionKind], str]] = {}
     for index, capability in enumerate(capabilities):
         if not isinstance(capability, Mapping):
             raise SkillManifestError(f"capability {index} must be an object")
-        name = capability.get("name")
-        kinds = capability.get("kinds")
+        name, kinds = capability.get("name"), capability.get("kinds")
         description = capability.get("description", "")
         if not isinstance(name, str) or not name:
             raise SkillManifestError(f"capability {index} requires a non-empty name")
@@ -110,10 +106,7 @@ def _manifest_records(manifest: Mapping[str, Any]) -> dict[str, tuple[frozenset[
 def validate_manifest(registry: SkillRegistry, manifest: Mapping[str, Any]) -> None:
     """Prove that the executable registry exactly matches the declaration."""
     declared = _manifest_records(manifest)
-    actual = {
-        name: (skill.kinds, skill.description)
-        for name, skill in registry._skills.items()
-    }
+    actual = {name: (skill.kinds, skill.description) for name, skill in registry._skills.items()}
     if set(actual) != set(declared):
         missing = sorted(set(declared) - set(actual))
         undeclared = sorted(set(actual) - set(declared))
@@ -124,7 +117,6 @@ def validate_manifest(registry: SkillRegistry, manifest: Mapping[str, Any]) -> N
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
-    """Load and structurally validate a JSON skill manifest."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -136,7 +128,6 @@ def load_manifest(path: Path) -> dict[str, Any]:
 
 
 def resolve_inside(root: Path, path: str) -> tuple[Path, Path]:
-    """Resolve ``path`` under ``root`` and prove (post-resolution) it stays inside."""
     root = Path(root).resolve()
     candidate = Path(str(path))
     if candidate.is_absolute():
@@ -149,18 +140,37 @@ def resolve_inside(root: Path, path: str) -> tuple[Path, Path]:
     return target, relative
 
 
+def _limit(arguments: Mapping[str, Any], name: str, default: int) -> int:
+    value = arguments.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
 def filesystem_skills(repo_root: Path, registry: SkillRegistry | None = None) -> SkillRegistry:
     root = Path(repo_root).resolve()
     registry = registry if registry is not None else SkillRegistry()
 
     def read(action: Action) -> str:
         target, _ = resolve_inside(root, action.arguments["path"])
+        max_bytes = _limit(action.arguments, "max_bytes", DEFAULT_MAX_FILE_BYTES)
+        if target.stat().st_size > max_bytes:
+            raise ValueError("file exceeds read size limit")
         return target.read_text(encoding="utf-8")
 
     def write(action: Action) -> str:
         target, relative = resolve_inside(root, action.arguments["path"])
+        mode = action.arguments.get("mode", "replace")
+        if mode not in {"create", "replace"}:
+            raise ValueError("write mode must be 'create' or 'replace'")
+        if mode == "create" and target.exists():
+            raise FileExistsError(relative.as_posix())
+        content = str(action.arguments.get("content", ""))
+        max_bytes = _limit(action.arguments, "max_bytes", DEFAULT_MAX_FILE_BYTES)
+        if len(content.encode("utf-8")) > max_bytes:
+            raise ValueError("content exceeds write size limit")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(str(action.arguments.get("content", "")), encoding="utf-8")
+        target.write_text(content, encoding="utf-8")
         return relative.as_posix()
 
     def search(action: Action) -> list[str]:
@@ -168,23 +178,34 @@ def filesystem_skills(repo_root: Path, registry: SkillRegistry | None = None) ->
         glob = str(action.arguments.get("glob", "**/*"))
         if not pattern:
             raise ValueError("search requires a pattern")
+        max_files = _limit(action.arguments, "max_files", DEFAULT_MAX_SEARCH_FILES)
+        max_bytes = _limit(action.arguments, "max_bytes", DEFAULT_MAX_SEARCH_BYTES)
+        max_hits = _limit(action.arguments, "max_hits", DEFAULT_MAX_SEARCH_HITS)
         hits: list[str] = []
+        scanned_files = scanned_bytes = 0
         for candidate in sorted(root.glob(glob)):
             relative = candidate.relative_to(root)
             if not candidate.is_file() or ".git" in relative.parts:
                 continue
+            scanned_files += 1
+            if scanned_files > max_files:
+                raise ValueError("search file limit exceeded")
             try:
+                size = candidate.stat().st_size
+                if scanned_bytes + size > max_bytes:
+                    raise ValueError("search byte limit exceeded")
+                scanned_bytes += size
                 text = candidate.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 continue
             for line_number, line in enumerate(text.splitlines(), start=1):
                 if pattern in line:
                     hits.append(f"{relative.as_posix()}:{line_number}:{line}")
+                    if len(hits) >= max_hits:
+                        return hits
         return hits
 
     registry.register(Skill("filesystem.read", frozenset({ActionKind.READ}), read, "read a repository file"))
-    registry.register(
-        Skill("filesystem.write", frozenset({ActionKind.WRITE, ActionKind.EDIT}), write, "write a repository file")
-    )
+    registry.register(Skill("filesystem.write", frozenset({ActionKind.WRITE, ActionKind.EDIT}), write, "write a repository file"))
     registry.register(Skill("filesystem.search", frozenset({ActionKind.SEARCH}), search, "substring search"))
     return registry
