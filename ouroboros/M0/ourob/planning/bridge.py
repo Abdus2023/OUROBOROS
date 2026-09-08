@@ -1,4 +1,4 @@
-"""Kernel-facing planning bridge (M2.10).
+"""Kernel-facing planning bridge (M2.13).
 
 Planner output remains untrusted until validated. Planning attempts are
 identified by canonical request/response digests before proposals enter the
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..kernel import Kernel
-from ..model import Action, Event, Plan, Run, RunState
+from ..model import Action, Event, Plan, Run, RunState, plan_digest
 from .model import PlanningRequest
 from .validator import PlanValidator, digest, request_digest
 
@@ -42,6 +42,7 @@ class PlanningBridgeResult:
     attempt: int = 0
     request_digest: str = ""
     response_digest: str = ""
+    plan_digest: str = ""
 
 
 class PlanningBridge:
@@ -94,15 +95,22 @@ class PlanningBridge:
             raise TypeError("planning validator returned a non-Action object")
 
         attempt = planning_attempt_count(self.kernel, run.id) + 1
-        self.kernel.plan(run, Plan(request.objective, tuple(result.normalized_actions)))
+        normalized_actions = tuple(result.normalized_actions)
+        canonical_plan_hash = plan_digest(normalized_actions)
+        self.kernel.plan(run, Plan(request.objective, normalized_actions))
         self.kernel.journal.append(Event(
             PLANNING_ACCEPTED,
             run.id,
             generation=run.generation,
-            data={"attempt": attempt, "request_digest": request_hash, "response_digest": response_hash},
+            data={
+                "attempt": attempt,
+                "request_digest": request_hash,
+                "response_digest": response_hash,
+                "plan_digest": canonical_plan_hash,
+            },
         ))
         run.planning_attempts = attempt
-        return PlanningBridgeResult(run, True, (), attempt, request_hash, response_hash)
+        return PlanningBridgeResult(run, True, (), attempt, request_hash, response_hash, canonical_plan_hash)
 
 
 __all__ = ["PLANNING_FAILED", "PLANNING_ACCEPTED", "planning_attempt_count", "PlanningBridge", "PlanningBridgeResult"]
