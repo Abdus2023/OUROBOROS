@@ -1,9 +1,10 @@
-"""Kernel-facing planning bridge (M2.13).
+"""Kernel-facing planning bridge (M2.14).
 
 Planner output remains untrusted until validated. Planning attempts are
 identified by canonical request/response digests before proposals enter the
-kernel's normal planning lifecycle. Attempt history is derived from the
-append-only journal rather than trusted from mutable run state.
+kernel's normal planning lifecycle. Durable planning state is reconstructed
+through the canonical history auditor; mutable run counters are compatibility
+cache only.
 """
 from __future__ import annotations
 
@@ -12,26 +13,24 @@ from typing import Any
 
 from ..kernel import Kernel
 from ..model import Action, Event, Plan, Run, RunState, plan_digest
+from .events import PLANNING_ACCEPTED, PLANNING_ATTEMPT_EVENTS, PLANNING_FAILED
 from .model import PlanningRequest
 from .validator import PlanValidator, digest, request_digest
 
 
-PLANNING_FAILED = "PLANNING_FAILED"
-PLANNING_ACCEPTED = "PLANNING_ACCEPTED"
-PLANNING_ATTEMPT_EVENTS = frozenset({PLANNING_FAILED, PLANNING_ACCEPTED})
+def planning_history(kernel: Kernel, run_id: str):
+    """Return canonical journal-derived planning state.
+
+    The local import intentionally avoids a module cycle because the legacy
+    history module still re-exports planning event names from this bridge.
+    """
+    from .history import reconstruct_planning_history
+    return reconstruct_planning_history(kernel, run_id)
 
 
 def planning_attempt_count(kernel: Kernel, run_id: str) -> int:
-    """Derive the durable planning-attempt count from the journal.
-
-    ``Run.planning_attempts`` is retained as a compatibility cache only and
-    is never authoritative for planning budgets or attempt identity.
-    """
-    return sum(
-        1
-        for event in kernel.journal.events()
-        if event.run_id == run_id and event.name in PLANNING_ATTEMPT_EVENTS
-    )
+    """Derive the durable planning-attempt count from canonical history."""
+    return planning_history(kernel, run_id).count
 
 
 @dataclass(frozen=True)
@@ -113,4 +112,7 @@ class PlanningBridge:
         return PlanningBridgeResult(run, True, (), attempt, request_hash, response_hash, canonical_plan_hash)
 
 
-__all__ = ["PLANNING_FAILED", "PLANNING_ACCEPTED", "planning_attempt_count", "PlanningBridge", "PlanningBridgeResult"]
+__all__ = [
+    "PLANNING_FAILED", "PLANNING_ACCEPTED", "PLANNING_ATTEMPT_EVENTS",
+    "planning_history", "planning_attempt_count", "PlanningBridge", "PlanningBridgeResult",
+]
