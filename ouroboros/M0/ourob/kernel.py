@@ -96,6 +96,14 @@ class Kernel:
             raise KernelError("RUN_PLANNED generation does not match run generation")
         return claimed
 
+    def _authorized_plan_digest(self, run: Run) -> str:
+        """Revalidate the durable/live plan identity immediately before execution."""
+        durable = self._durable_plan_digest(run)
+        live = plan_digest(tuple(run.planned))
+        if live != durable:
+            raise KernelError("live plan differs from durable authorized plan identity")
+        return durable
+
     def intake(self, run_id: str, task: str) -> Run:
         if not run_id or not task:
             raise KernelError("intake requires a run id and a task")
@@ -120,10 +128,7 @@ class Kernel:
 
     def authorize(self, run: Run) -> Run:
         self._require_state(run, RunState.PLANNED, RunState.OBSERVED)
-        durable_digest = self._durable_plan_digest(run)
-        live_digest = plan_digest(tuple(run.planned))
-        if live_digest != durable_digest:
-            raise KernelError("live plan differs from durable RUN_PLANNED identity")
+        durable_digest = self._authorized_plan_digest(run)
         self._emit(EventName.AUTHORIZATION_GRANTED, run,
                    previous_state=run.state.value, plan_digest=durable_digest)
         transition(run, RunState.AUTHORIZED)
@@ -133,36 +138,44 @@ class Kernel:
         if run.state is RunState.OBSERVED:
             self.authorize(run)
         self._require_state(run, RunState.AUTHORIZED)
+        authorized_plan_digest = self._authorized_plan_digest(run)
         planned = {a.id: a for a in run.planned}
         if action.id not in planned or planned[action.id] != action:
             raise KernelError(f"action {action.id} was not part of the authorized plan")
         if action.id in run.executed_ids:
             raise KernelError(f"action {action.id} has already been executed")
         self._evidence.pop(run.id, None)
-        self._emit(EventName.ACTION_PROPOSED, run, action.id, action=action.to_record())
+        self._emit(EventName.ACTION_PROPOSED, run, action.id,
+                   action=action.to_record(), plan_digest=authorized_plan_digest)
         transition(run, RunState.EXECUTING)
         decision = self.policy.evaluate(action)
         if not decision.allowed:
-            self._emit(EventName.POLICY_DENIED, run, action.id, reason=decision.reason, mutation_class=decision.mutation_class.value)
+            self._emit(EventName.POLICY_DENIED, run, action.id, reason=decision.reason,
+                       mutation_class=decision.mutation_class.value,
+                       plan_digest=authorized_plan_digest)
             transition(run, RunState.BLOCKED)
             observation = Observation(action.id, False, run.generation, None, decision.reason)
             run.observations.append(observation)
             return ExecutionOutcome(observation, run.state, decision.reason)
-        self._emit(EventName.POLICY_ALLOWED, run, action.id, reason=decision.reason, mutation_class=decision.mutation_class.value)
+        self._emit(EventName.POLICY_ALLOWED, run, action.id, reason=decision.reason,
+                   mutation_class=decision.mutation_class.value,
+                   plan_digest=authorized_plan_digest)
         raw = self.skills.execute(action)
         new_generation = self._generation()
         observation = Observation(action.id, raw.ok, new_generation, raw.result, raw.error)
         run.actions.append(action)
         run.observations.append(observation)
         if not observation.ok:
-            self._emit(EventName.ACTION_FAILED, run, action.id, error=observation.error or "")
+            self._emit(EventName.ACTION_FAILED, run, action.id,
+                       error=observation.error or "", plan_digest=authorized_plan_digest)
             transition(run, RunState.FAILED)
             return ExecutionOutcome(observation, run.state, observation.error or "action failed")
         mutated = new_generation != run.generation
         run.generation = new_generation
         if mutated:
             run.verification_epoch += 1
-        self._emit(EventName.ACTION_EXECUTED, run, action.id, ok=True, mutated=mutated, epoch=run.verification_epoch,
+        self._emit(EventName.ACTION_EXECUTED, run, action.id, ok=True, mutated=mutated,
+                   epoch=run.verification_epoch, plan_digest=authorized_plan_digest,
                    result=observation.result if isinstance(observation.result, (str, int, float, bool, list, dict)) else None)
         transition(run, RunState.OBSERVED)
         return ExecutionOutcome(observation, run.state, "observed")
