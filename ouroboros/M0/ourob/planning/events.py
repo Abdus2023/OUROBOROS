@@ -1,0 +1,8 @@
+"""Canonical durable planning event names (M2.14)."""
+from __future__ import annotations
+
+PLANNING_FAILED = "PLANNING_FAILED"
+PLANNING_ACCEPTED = "PLANNING_ACCEPTED"
+PLANNING_ATTEMPT_EVENTS = frozenset({PLANNING_FAILED, PLANNING_ACCEPTED})
+
+__all__ = ["PLANNING_FAILED", "PLANNING_ACCEPTED", "PLANNING_ATTEMPT_EVENTS"]
