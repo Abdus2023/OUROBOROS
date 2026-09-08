@@ -1,17 +1,9 @@
-"""Durable journal recovery (M1.1, M1.3).
+"""Durable journal recovery (M1.1, M1.3, M0.8 quarantine lifecycle).
 
 Reconstructs a ``Run`` exclusively from validated journal records. Recovery
-may resume work, but it never manufactures authorization that was not
-durably recorded:
-
-* AUTHORIZED requires a durable AUTHORIZATION_GRANTED event.
-* VERIFIED requires a durable VERIFICATION_EVIDENCE_CAPTURED event whose
-  evidence passes integrity, generation and epoch checks.
-* PROMOTABLE / PROMOTED require durable PROMOTION_AUTHORIZED / PROMOTED events
-  bound to that exact evidence digest.
-
-Every state change is replayed through the fail-closed state machine, so an
-event sequence implying an illegal transition is rejected outright.
+never retries an interrupted mutation. An ``EXECUTING`` action without a
+terminal execution record may be durably quarantined, then explicitly
+reconciled by a recovery authority.
 """
 
 from __future__ import annotations
@@ -78,9 +70,12 @@ def _apply(run: Run, event: Event, state: dict[str, Any]) -> None:
         if not isinstance(actions, list) or not actions:
             raise RecoveryError("RUN_PLANNED requires a non-empty action list")
         try:
-            run.planned = [Action.from_record(a) for a in actions]
+            actions = [Action.from_record(a) for a in actions]
         except ValueError as exc:
             raise RecoveryError(f"RUN_PLANNED: {exc}") from exc
+        if len({a.id for a in actions}) != len(actions):
+            raise RecoveryError("RUN_PLANNED contains duplicate action ids")
+        run.planned = actions
         _step(run, RunState.PLANNED, event)
         return
 
@@ -100,6 +95,7 @@ def _apply(run: Run, event: Event, state: dict[str, Any]) -> None:
             raise RecoveryError(f"ACTION_PROPOSED: action {event.action_id} was not part of the durable plan")
         _step(run, RunState.EXECUTING, event)
         state["pending"] = action
+        state["allowed"] = False
         state["evidence"] = None
         return
 
@@ -114,7 +110,49 @@ def _apply(run: Run, event: Event, state: dict[str, Any]) -> None:
             raise RecoveryError("POLICY_DENIED without a pending proposed action")
         _step(run, RunState.BLOCKED, event)
         state["pending"] = None
+        state["allowed"] = False
         return
+
+    if name is EventName.RECOVERY_QUARANTINED:
+        pending = state.get("pending")
+        if run.state is not RunState.EXECUTING or pending is None:
+            raise RecoveryError("RECOVERY_QUARANTINED requires an interrupted EXECUTING action")
+        if event.action_id != pending.id:
+            raise RecoveryError("RECOVERY_QUARANTINED action does not match pending action")
+        if state.get("quarantined"):
+            raise RecoveryError("run is already quarantined")
+        _step(run, RunState.QUARANTINED, event)
+        state["quarantined"] = True
+        return
+
+    if name is EventName.RECOVERY_RECONCILED:
+        if run.state is not RunState.QUARANTINED:
+            raise RecoveryError("RECOVERY_RECONCILED outside QUARANTINED")
+        pending = state.get("pending")
+        if pending is None or event.action_id != pending.id:
+            raise RecoveryError("RECOVERY_RECONCILED action does not match quarantined action")
+        disposition = event.data.get("disposition")
+        if disposition == "NOT_EXECUTED":
+            # The action is still pending, but no mutation is treated as having
+            # occurred. Re-enter PLANNED so normal authorization is mandatory.
+            _step(run, RunState.PLANNED, event)
+            state["pending"] = None
+            state["allowed"] = False
+            state["quarantined"] = False
+            return
+        if disposition == "UNKNOWN":
+            # Unknown side effects are never retried automatically.
+            _step(run, RunState.BLOCKED, event)
+            state["pending"] = None
+            state["allowed"] = False
+            state["quarantined"] = False
+            return
+        if disposition == "EXECUTED":
+            # Do not manufacture an observation from a bare operator claim.
+            # A future recovery authority may add a cryptographically bound
+            # execution receipt; until then this disposition is fail-closed.
+            raise RecoveryError("EXECUTED reconciliation requires a bound execution receipt")
+        raise RecoveryError(f"unknown recovery disposition: {disposition!r}")
 
     if name is EventName.ACTION_EXECUTED:
         pending = state.get("pending")
@@ -157,7 +195,6 @@ def _apply(run: Run, event: Event, state: dict[str, Any]) -> None:
 
     if name is EventName.VERIFICATION_FAILED:
         if run.state is RunState.OBSERVED:
-            # Kernel emits VERIFICATION_FAILED then transitions OBSERVED->VERIFYING->FAILED
             _step(run, RunState.VERIFYING, event)
         if run.state is not RunState.VERIFYING:
             raise RecoveryError("VERIFICATION_FAILED outside VERIFYING")
@@ -229,7 +266,7 @@ def recover_run(events: list[Event], run_id: str) -> RecoveredRun:
         raise RecoveryError("RUN_CREATED lacks a valid generation")
     run = Run(run_id, task, generation=first.generation)
     transition(run, RunState.INTAKE)
-    state: dict[str, Any] = {"pending": None, "allowed": False, "evidence": None, "gate_results": []}
+    state: dict[str, Any] = {"pending": None, "allowed": False, "evidence": None, "gate_results": [], "quarantined": False}
     for event in relevant[1:]:
         _apply(run, event, state)
     return RecoveredRun(run, state.get("evidence"), relevant)
