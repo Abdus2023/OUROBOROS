@@ -1,8 +1,9 @@
-"""Bounded planner-to-kernel lifecycle controller (M2.8).
+"""Bounded planner-to-kernel lifecycle controller (M2.10).
 
 The controller is orchestration only. Planner output is proposal data; the
 planning bridge validates it, and the kernel remains the sole authority for
-authorization, execution, verification, and promotion.
+authorization, execution, verification, and promotion. Planning budgets are
+derived from the durable journal, not mutable run counters.
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..model import Event, Run, RunState
-from .bridge import PLANNING_FAILED, PlanningBridge, PlanningBridgeResult
+from .bridge import PLANNING_FAILED, PlanningBridge, PlanningBridgeResult, planning_attempt_count
 from .context import PlanningContext
 from .model import PlanningRequest, PlanningResponse
 from .validator import request_digest
@@ -41,7 +42,9 @@ class PlanningController:
     ) -> PlanningCycleResult:
         if run.state is not RunState.INTAKE:
             raise ValueError(f"planning requires INTAKE run, found {run.state.value}")
-        if run.planning_attempts >= self.max_attempts:
+        attempts = planning_attempt_count(self.bridge.kernel, run.id)
+        run.planning_attempts = attempts
+        if attempts >= self.max_attempts:
             raise ValueError("planning attempt budget exhausted")
         if context.run_id != request.run_id or context.repository_id != request.repository_id:
             raise ValueError("planning context does not match request")
@@ -51,19 +54,20 @@ class PlanningController:
         try:
             response = planner(request, context)
         except Exception as exc:
-            run.planning_attempts += 1
+            attempt = planning_attempt_count(self.bridge.kernel, run.id) + 1
             self.bridge.kernel.journal.append(Event(
                 PLANNING_FAILED,
                 run.id,
                 generation=run.generation,
                 data={
-                    "attempt": run.planning_attempts,
+                    "attempt": attempt,
                     "request_digest": request_digest(request),
                     "response_digest": "",
                     "violations": ["PLANNER_ERROR"],
                     "error": f"{type(exc).__name__}: {exc}",
                 },
             ))
+            run.planning_attempts = attempt
             return PlanningCycleResult(run, None, f"{type(exc).__name__}: {exc}")
 
         planning = self.bridge.apply_to_run(run, request, response)
