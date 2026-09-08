@@ -11,6 +11,21 @@ from ..policy import PolicyEngine
 from .model import PlanValidation, PlanViolation, PlanningRequest, PlanningResponse
 
 
+def canonical_request(request: PlanningRequest) -> bytes:
+    payload = {
+        "request_id": request.request_id,
+        "run_id": request.run_id,
+        "repository_id": request.repository_id,
+        "generation": request.generation,
+        "mutation_epoch": request.mutation_epoch,
+        "objective": request.objective,
+        "constraints": list(request.constraints),
+        "allowed_action_kinds": list(request.allowed_action_kinds),
+        "required_gates": list(request.required_gates),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
 def canonical_response(response: PlanningResponse) -> bytes:
     payload = {
         "request_id": response.request_id,
@@ -28,11 +43,15 @@ def canonical_response(response: PlanningResponse) -> bytes:
         "verification_gates": list(response.verification_gates),
         "rollback_strategy": response.rollback_strategy,
     }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
 def digest(response: PlanningResponse) -> str:
     return hashlib.sha256(canonical_response(response)).hexdigest()
+
+
+def request_digest(request: PlanningRequest) -> str:
+    return hashlib.sha256(canonical_request(request)).hexdigest()
 
 
 class PlanValidator:
