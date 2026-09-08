@@ -9,6 +9,7 @@ from .history import (
     PlanningHistoryIntegrityError,
     reconstruct_planning_history,
 )
+from .lifecycle import audit_planning_lifecycle
 from .llm import LLMPlanner
 from .model import PlanValidation, PlanViolation, PlanningRequest, PlanningResponse, ProposedAction
 from .parser import SCHEMA, parse_response
@@ -21,6 +22,7 @@ __all__ = [
     "PlanningBridge", "PlanningBridgeResult", "PlanningController", "PlanningCycleResult",
     "ContextFact", "PlanningContext", "LLMPlanner", "LegacyPlannerAdapter", "PlanningReplay",
     "PlanningAttempt", "PlanningHistory", "PlanningHistoryIntegrityError", "reconstruct_planning_history",
+    "audit_planning_lifecycle",
     "PlanValidation", "PlanViolation", "PlanningRequest", "PlanningResponse", "ProposedAction",
     "SCHEMA", "parse_response", "Planner", "PlannerProvider", "UnavailableProvider",
     "PlanValidator", "canonical_request", "canonical_response", "digest", "request_digest",
