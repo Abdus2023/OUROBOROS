@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from ourob.model import Action, ActionKind
+from ourob.model import Action, ActionKind, value_digest
 from ourob.skills import (
     Skill,
     SkillManifestError,
@@ -81,6 +81,42 @@ def test_search_limits(tmp_path: Path) -> None:
     registry = filesystem_skills(tmp_path)
     observation = registry.execute(Action("a", ActionKind.SEARCH, "filesystem.search", {"pattern": "needle", "max_files": 0}))
     assert not observation.ok
+
+
+def test_skill_observation_carries_execution_provenance(tmp_path: Path) -> None:
+    registry = filesystem_skills(tmp_path)
+    action = Action("read-1", ActionKind.READ, "filesystem.read", {"path": "x.txt"})
+    (tmp_path / "x.txt").write_text("hello", encoding="utf-8")
+    observation = registry.execute(action)
+    assert observation.ok
+    assert observation.action_id == action.id
+    assert observation.skill == action.skill
+    assert observation.kind is action.kind
+    assert observation.arguments_digest == value_digest(action.arguments)
+    assert observation.result_digest == value_digest("hello")
+
+
+def test_failed_skill_observation_preserves_provenance(tmp_path: Path) -> None:
+    registry = filesystem_skills(tmp_path)
+    action = Action("missing", ActionKind.READ, "filesystem.read", {"path": "missing.txt"})
+    observation = registry.execute(action)
+    assert not observation.ok
+    assert observation.skill == action.skill
+    assert observation.kind is action.kind
+    assert observation.arguments_digest == value_digest(action.arguments)
+    assert observation.result_digest == ""
+
+
+def test_observation_record_is_auditable(tmp_path: Path) -> None:
+    registry = filesystem_skills(tmp_path)
+    action = Action("read-2", ActionKind.READ, "filesystem.read", {"path": "x.txt"})
+    (tmp_path / "x.txt").write_text("hello", encoding="utf-8")
+    record = registry.execute(action).to_record()
+    assert record["action_id"] == "read-2"
+    assert record["skill"] == "filesystem.read"
+    assert record["kind"] == "READ"
+    assert record["arguments_digest"] == value_digest(action.arguments)
+    assert record["result_digest"] == value_digest("hello")
 
 
 def test_resolve_inside_rejects_escape_and_absolute(tmp_path: Path) -> None:
