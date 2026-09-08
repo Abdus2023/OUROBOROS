@@ -50,9 +50,9 @@ class VerificationStatus(StrEnum):
 
 class EventName(StrEnum):
     """Durable journal event names emitted by the kernel."""
-
     RUN_CREATED = "RUN_CREATED"
     RUN_PLANNED = "RUN_PLANNED"
+    PLANNING_FAILED = "PLANNING_FAILED"
     AUTHORIZATION_GRANTED = "AUTHORIZATION_GRANTED"
     ACTION_PROPOSED = "ACTION_PROPOSED"
     POLICY_ALLOWED = "POLICY_ALLOWED"
@@ -195,6 +195,7 @@ class Run:
     state: RunState = RunState.NO_TASK
     generation: str = ""
     verification_epoch: int = 0
+    planning_attempts: int = 0
     planned: list[Action] = field(default_factory=list)
     actions: list[Action] = field(default_factory=list)
     observations: list[Observation] = field(default_factory=list)
