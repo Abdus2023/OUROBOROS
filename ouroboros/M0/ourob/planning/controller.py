@@ -1,4 +1,4 @@
-"""Bounded planner-to-kernel lifecycle controller (M2.7).
+"""Bounded planner-to-kernel lifecycle controller (M2.8).
 
 The controller is orchestration only. Planner output is proposal data; the
 planning bridge validates it, and the kernel remains the sole authority for
@@ -13,6 +13,7 @@ from ..model import Event, Run, RunState
 from .bridge import PLANNING_FAILED, PlanningBridge, PlanningBridgeResult
 from .context import PlanningContext
 from .model import PlanningRequest, PlanningResponse
+from .validator import request_digest
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,10 @@ class PlanningController:
             raise ValueError(f"planning requires INTAKE run, found {run.state.value}")
         if run.planning_attempts >= self.max_attempts:
             raise ValueError("planning attempt budget exhausted")
+        if context.run_id != request.run_id or context.repository_id != request.repository_id:
+            raise ValueError("planning context does not match request")
+        if context.generation != request.generation or context.mutation_epoch != request.mutation_epoch:
+            raise ValueError("planning context is stale")
 
         try:
             response = planner(request, context)
@@ -53,7 +58,7 @@ class PlanningController:
                 generation=run.generation,
                 data={
                     "attempt": run.planning_attempts,
-                    "request_digest": "",
+                    "request_digest": request_digest(request),
                     "response_digest": "",
                     "violations": ["PLANNER_ERROR"],
                     "error": f"{type(exc).__name__}: {exc}",
