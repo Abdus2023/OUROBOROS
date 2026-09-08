@@ -1,8 +1,9 @@
 """M2 planning boundary."""
-from .bridge import PlanningBridge, PlanningBridgeResult
+from .bridge import PlanningBridge, PlanningBridgeResult, planning_history
 from .compat import LegacyPlannerAdapter
 from .context import ContextFact, PlanningContext
 from .controller import PlanningController, PlanningCycleResult
+from .events import PLANNING_ACCEPTED, PLANNING_ATTEMPT_EVENTS, PLANNING_FAILED
 from .history import (
     PlanningAttempt,
     PlanningHistory,
@@ -19,7 +20,8 @@ from .replay import PlanningReplay, canonical_context, context_digest, planning_
 from .validator import PlanValidator, canonical_request, canonical_response, digest, request_digest
 
 __all__ = [
-    "PlanningBridge", "PlanningBridgeResult", "PlanningController", "PlanningCycleResult",
+    "PlanningBridge", "PlanningBridgeResult", "planning_history", "PlanningController", "PlanningCycleResult",
+    "PLANNING_ACCEPTED", "PLANNING_ATTEMPT_EVENTS", "PLANNING_FAILED",
     "ContextFact", "PlanningContext", "LLMPlanner", "LegacyPlannerAdapter", "PlanningReplay",
     "PlanningAttempt", "PlanningHistory", "PlanningHistoryIntegrityError", "reconstruct_planning_history",
     "audit_planning_lifecycle",
