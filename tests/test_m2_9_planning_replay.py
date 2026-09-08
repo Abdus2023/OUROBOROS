@@ -1,3 +1,5 @@
+from dataclasses import FrozenInstanceError
+
 from ourob.planning import (
     ContextFact,
     PlanningContext,
@@ -93,7 +95,13 @@ def test_epoch_change_invalidates_replay():
         raise AssertionError("stale epoch replay was accepted")
 
 
-def test_recorded_response_tampering_is_detected():
+def test_recorded_response_is_immutable_and_digest_bound():
     request, context, response = _fixtures()
     replay = PlanningReplay.record(request, context, response)
-    replay.response = response  # frozen dataclass: construction-time tampering is impossible
+    try:
+        replay.response = response
+    except FrozenInstanceError:
+        pass
+    else:
+        raise AssertionError("replay response became mutable")
+    assert replay.replay(request, context) == response
