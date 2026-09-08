@@ -8,7 +8,7 @@ from .model import PlanValidation, PlanViolation, PlanningRequest, PlanningRespo
 from .parser import SCHEMA, parse_response
 from .protocol import Planner
 from .provider import PlannerProvider, UnavailableProvider
-from .replay import PlanningReplay
+from .replay import PlanningReplay, canonical_context, context_digest, planning_envelope_digest
 from .validator import PlanValidator, canonical_request, canonical_response, digest, request_digest
 
 __all__ = [
@@ -17,4 +17,5 @@ __all__ = [
     "PlanValidation", "PlanViolation", "PlanningRequest", "PlanningResponse", "ProposedAction",
     "SCHEMA", "parse_response", "Planner", "PlannerProvider", "UnavailableProvider",
     "PlanValidator", "canonical_request", "canonical_response", "digest", "request_digest",
+    "canonical_context", "context_digest", "planning_envelope_digest",
 ]
