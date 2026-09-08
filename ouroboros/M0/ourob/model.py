@@ -7,6 +7,8 @@ I/O or makes authority decisions.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -71,6 +73,13 @@ class EventName(StrEnum):
     RECOVERY_ROOT_ROTATION_AUTHORIZED = "RECOVERY_ROOT_ROTATION_AUTHORIZED"
     RECOVERY_OF_RECOVERY_AUTHORIZED = "RECOVERY_OF_RECOVERY_AUTHORIZED"
     RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED = "RECOVERY_OF_RECOVERY_LIFECYCLE_AUTHORIZED"
+
+
+def plan_digest(actions: tuple["Action", ...] | list["Action"]) -> str:
+    """Return the canonical identity of an authorized plan's actions."""
+    payload = [action.to_record() for action in actions]
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
