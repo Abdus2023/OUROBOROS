@@ -1,4 +1,5 @@
 """M2 planning boundary."""
+from .bridge import PlanningBridge, PlanningBridgeResult
 from .compat import LegacyPlannerAdapter
 from .context import ContextFact, PlanningContext
 from .llm import LLMPlanner
@@ -9,6 +10,7 @@ from .provider import PlannerProvider, UnavailableProvider
 from .validator import PlanValidator, canonical_response, digest
 
 __all__ = [
+    "PlanningBridge", "PlanningBridgeResult",
     "ContextFact", "PlanningContext", "LLMPlanner", "LegacyPlannerAdapter",
     "PlanValidation", "PlanViolation", "PlanningRequest", "PlanningResponse", "ProposedAction",
     "SCHEMA", "parse_response", "Planner", "PlannerProvider", "UnavailableProvider",
