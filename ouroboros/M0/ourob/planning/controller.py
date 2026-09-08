@@ -1,9 +1,9 @@
-"""Bounded planner-to-kernel lifecycle controller (M2.10).
+"""Bounded planner-to-kernel lifecycle controller (M2.14).
 
 The controller is orchestration only. Planner output is proposal data; the
 planning bridge validates it, and the kernel remains the sole authority for
 authorization, execution, verification, and promotion. Planning budgets are
-derived from the durable journal, not mutable run counters.
+derived from canonical durable planning history.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..model import Event, Run, RunState
-from .bridge import PLANNING_FAILED, PlanningBridge, PlanningBridgeResult, planning_attempt_count
+from .bridge import PLANNING_FAILED, PlanningBridge, PlanningBridgeResult, planning_history
 from .context import PlanningContext
 from .model import PlanningRequest, PlanningResponse
 from .validator import request_digest
@@ -42,8 +42,9 @@ class PlanningController:
     ) -> PlanningCycleResult:
         if run.state is not RunState.INTAKE:
             raise ValueError(f"planning requires INTAKE run, found {run.state.value}")
-        attempts = planning_attempt_count(self.bridge.kernel, run.id)
-        run.planning_attempts = attempts
+        history = planning_history(self.bridge.kernel, run.id)
+        attempts = history.count
+        run.planning_attempts = attempts  # compatibility cache; never authoritative
         if attempts >= self.max_attempts:
             raise ValueError("planning attempt budget exhausted")
         if context.run_id != request.run_id or context.repository_id != request.repository_id:
@@ -54,7 +55,7 @@ class PlanningController:
         try:
             response = planner(request, context)
         except Exception as exc:
-            attempt = planning_attempt_count(self.bridge.kernel, run.id) + 1
+            attempt = planning_history(self.bridge.kernel, run.id).count + 1
             self.bridge.kernel.journal.append(Event(
                 PLANNING_FAILED,
                 run.id,
