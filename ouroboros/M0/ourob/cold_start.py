@@ -73,34 +73,39 @@ def quarantine_run(journal_path: Path, run_id: str) -> RecoveredRun:
     action is executed by this operation.
     """
     journal = Journal(journal_path)
-    holder: dict[str, RecoveredRun] = {}
+    initial = recover_from_journal(journal_path, run_id)
+    if initial.run.state is not RunState.EXECUTING:
+        raise ColdStartError(
+            f"run {run_id} is not EXECUTING; cannot quarantine state {initial.run.state}"
+        )
+    pending = next((a for a in initial.run.planned if a.id not in initial.run.executed_ids), None)
+    if pending is None:
+        raise ColdStartError(f"run {run_id} has no pending action to quarantine")
 
     def validate(records) -> None:
         recovered = recover_run([record.event for record in records], run_id)
         if recovered.run.state is not RunState.EXECUTING:
             raise ColdStartError(
-                f"run {run_id} is not EXECUTING; cannot quarantine state {recovered.run.state}"
+                f"run {run_id} changed before quarantine; current state is {recovered.run.state}"
             )
-        holder["recovered"] = recovered
+        current_pending = next((a for a in recovered.run.planned if a.id not in recovered.run.executed_ids), None)
+        if current_pending is None or current_pending.id != pending.id or recovered.run.generation != initial.run.generation:
+            raise ColdStartError(f"run {run_id} changed before quarantine")
 
-    recovered_before = None
     try:
         journal.append_checked(
             Event(
                 EventName.RECOVERY_QUARANTINED.value,
                 run_id=run_id,
-                action_id=None,
-                generation=None,
+                action_id=pending.id,
+                generation=initial.run.generation,
                 data={"reason": "interrupted_execution"},
             ),
             validate,
         )
-        recovered_before = holder["recovered"]
     except RecoveryError as exc:
         raise ColdStartError(str(exc)) from exc
 
-    # The event is intentionally reread from the validated journal so the
-    # returned object is the exact durable post-quarantine state.
     return recover_from_journal(journal_path, run_id)
 
 
