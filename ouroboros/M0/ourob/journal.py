@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
-from .model import Event
+from .model import Event, Observation
 if TYPE_CHECKING:
     from .signed_trust import SignedCheckpoint, TrustStore
     from .trust import JournalTrustAnchor
@@ -33,6 +33,55 @@ class JournalRecord:
         record=self.body(); record["digest"]=self.digest; return record
 def canonical_json(value: Any) -> bytes: return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode("utf-8")
 def record_digest(body: dict[str, Any]) -> str: return sha256(canonical_json(body)).hexdigest()
+def observation_audit_record(observation: Observation) -> dict[str, Any]:
+    """Return the non-secret, replayable identity of an observation."""
+    return {
+        "action_id": observation.action_id,
+        "ok": observation.ok,
+        "generation": observation.generation,
+        "error": observation.error,
+        "skill": observation.skill,
+        "kind": observation.kind.value if observation.kind is not None else None,
+        "arguments_digest": observation.arguments_digest,
+        "result_digest": observation.result_digest,
+    }
+def observation_digest(observation: Observation) -> str:
+    """Return the canonical identity of an execution observation."""
+    return record_digest(observation_audit_record(observation))
+def verify_observation_event(event: Event) -> dict[str, Any]:
+    """Fail closed unless an event's durable observation identity is intact.
+
+    This verifies the observation independently of capability execution. Raw
+    action arguments and raw results are deliberately absent from the audit
+    projection; their content is represented only by digests.
+    """
+    record = event.data.get("observation")
+    claimed = event.data.get("observation_digest")
+    if not isinstance(record, dict):
+        raise JournalIntegrityError("observation event has no audit record")
+    if not isinstance(claimed, str) or not claimed:
+        raise JournalIntegrityError("observation event has no observation digest")
+    required = {"action_id", "ok", "generation", "error", "skill", "kind", "arguments_digest", "result_digest"}
+    if set(record) != required:
+        raise JournalIntegrityError("observation audit record schema mismatch")
+    if not isinstance(record["action_id"], str) or not record["action_id"]:
+        raise JournalIntegrityError("observation audit action id is invalid")
+    if not isinstance(record["ok"], bool) or not isinstance(record["generation"], str):
+        raise JournalIntegrityError("observation audit status or generation is invalid")
+    if record["error"] is not None and not isinstance(record["error"], str):
+        raise JournalIntegrityError("observation audit error is invalid")
+    if not isinstance(record["skill"], str) or not record["skill"]:
+        raise JournalIntegrityError("observation audit skill is invalid")
+    if record["kind"] is not None and not isinstance(record["kind"], str):
+        raise JournalIntegrityError("observation audit kind is invalid")
+    for field in ("arguments_digest", "result_digest"):
+        if not isinstance(record[field], str):
+            raise JournalIntegrityError(f"observation audit {field} is invalid")
+    if event.action_id != record["action_id"]:
+        raise JournalIntegrityError("observation action id disagrees with journal event")
+    if record_digest(record) != claimed:
+        raise JournalIntegrityError("observation digest mismatch")
+    return record
 def _parse_record(line: str,line_number: int) -> dict[str, Any]:
     try: parsed=json.loads(line)
     except json.JSONDecodeError as exc: raise JournalIntegrityError(f"malformed journal record at line {line_number}: {exc.msg}") from exc
@@ -71,6 +120,14 @@ class Journal:
     def verify(self)->bool:
         try: self.records()
         except JournalIntegrityError: return False
+        return True
+    def verify_observations(self)->bool:
+        try:
+            for record in self.records():
+                if record.event.name in {"ACTION_EXECUTED", "ACTION_FAILED", "POLICY_DENIED"}:
+                    verify_observation_event(record.event)
+        except JournalIntegrityError:
+            return False
         return True
     def head_digest(self)->str:
         records=self.records(); return records[-1].digest if records else GENESIS_DIGEST
