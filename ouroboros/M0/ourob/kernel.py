@@ -2,8 +2,8 @@
 
 The kernel owns exactly four things: state transitions, action authorization,
 skill dispatch and promotion authorization. Every authority-bearing step is
-journaled durably *before* the in-memory run advances, so a crash never
-leaves the journal claiming less authority than the process had.
+journaled durably *before* the in-memory run advances, so a crash never leaves
+the journal claiming less authority than the process had.
 
 M1.10 additionally carries the cold-start trust decision into the kernel:
 an authoritative kernel cannot promote unless the external trust boundary
@@ -19,7 +19,7 @@ from typing import Iterable
 from .evidence import VerificationEvidence, capture_evidence
 from .generation import repository_generation
 from .journal import Journal
-from .model import Action, Event, EventName, Observation, Plan, Run, RunState, VerificationStatus
+from .model import Action, Event, EventName, Observation, Plan, Run, RunState, VerificationStatus, plan_digest
 from .policy import PolicyEngine
 from .promotion import PromotionAuthority, PromotionDecision
 from .skills import SkillRegistry
@@ -59,8 +59,6 @@ class Kernel:
         self.trust_authenticated = trust_authenticated
         self._evidence: dict[str, VerificationEvidence] = {}
 
-    # -- helpers -----------------------------------------------------------
-
     def _generation(self) -> str:
         return repository_generation(self.repo_root).id
 
@@ -74,8 +72,6 @@ class Kernel:
         if run.state not in states:
             expected = " or ".join(s.value for s in states)
             raise KernelError(f"run {run.id} is {run.state}, expected {expected}")
-
-    # -- lifecycle ---------------------------------------------------------
 
     def intake(self, run_id: str, task: str) -> Run:
         if not run_id or not task:
@@ -92,7 +88,9 @@ class Kernel:
         ids = [a.id for a in plan.actions]
         if not ids or len(ids) != len(set(ids)):
             raise KernelError("plan requires a non-empty list of uniquely identified actions")
-        self._emit(EventName.RUN_PLANNED, run, actions=[a.to_record() for a in plan.actions])
+        self._emit(EventName.RUN_PLANNED, run,
+                   actions=[a.to_record() for a in plan.actions],
+                   plan_digest=plan_digest(plan.actions))
         run.planned = list(plan.actions)
         transition(run, RunState.PLANNED)
         return run
@@ -197,8 +195,6 @@ class Kernel:
         self._emit(EventName.PROMOTED, run, evidence_digest=evidence.digest)
         transition(run, RunState.PROMOTED)
         return decision
-
-    # -- convenience -------------------------------------------------------
 
     def run_plan(self, run_id: str, plan: Plan) -> Run:
         """Drive a plan through the complete lifecycle. Stops at the first
