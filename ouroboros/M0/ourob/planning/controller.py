@@ -1,14 +1,14 @@
-"""Bounded planner-to-kernel lifecycle controller (M2.14).
+"""Bounded planner-to-kernel lifecycle controller (M2.15).
 
 The controller is orchestration only. Planner output is proposal data; the
 planning bridge validates it, and the kernel remains the sole authority for
 authorization, execution, verification, and promotion. Planning budgets are
-derived from canonical durable planning history.
+derived from canonical durable planning history bound to the live boundary.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 from ..model import Event, Run, RunState
 from .bridge import PLANNING_FAILED, PlanningBridge, PlanningBridgeResult, planning_history
@@ -43,6 +43,7 @@ class PlanningController:
         if run.state is not RunState.INTAKE:
             raise ValueError(f"planning requires INTAKE run, found {run.state.value}")
         history = planning_history(self.bridge.kernel, run.id)
+        history.bound_to(run.generation, run.verification_epoch)
         attempts = history.count
         run.planning_attempts = attempts  # compatibility cache; never authoritative
         if attempts >= self.max_attempts:
@@ -66,6 +67,7 @@ class PlanningController:
                     "response_digest": "",
                     "violations": ["PLANNER_ERROR"],
                     "error": f"{type(exc).__name__}: {exc}",
+                    "mutation_epoch": run.verification_epoch,
                 },
             ))
             run.planning_attempts = attempt
