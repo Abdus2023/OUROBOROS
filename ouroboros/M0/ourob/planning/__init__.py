@@ -7,12 +7,12 @@ from .model import PlanValidation, PlanViolation, PlanningRequest, PlanningRespo
 from .parser import SCHEMA, parse_response
 from .protocol import Planner
 from .provider import PlannerProvider, UnavailableProvider
-from .validator import PlanValidator, canonical_response, digest
+from .validator import PlanValidator, canonical_request, canonical_response, digest, request_digest
 
 __all__ = [
     "PlanningBridge", "PlanningBridgeResult",
     "ContextFact", "PlanningContext", "LLMPlanner", "LegacyPlannerAdapter",
     "PlanValidation", "PlanViolation", "PlanningRequest", "PlanningResponse", "ProposedAction",
     "SCHEMA", "parse_response", "Planner", "PlannerProvider", "UnavailableProvider",
-    "PlanValidator", "canonical_response", "digest",
+    "PlanValidator", "canonical_request", "canonical_response", "digest", "request_digest",
 ]
