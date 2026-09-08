@@ -82,6 +82,12 @@ def plan_digest(actions: tuple["Action", ...] | list["Action"]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def value_digest(value: Any) -> str:
+    """Return a stable SHA-256 identity for JSON-compatible observation data."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=repr).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 @dataclass(frozen=True)
 class Action:
     id: str
@@ -121,6 +127,37 @@ class Observation:
     generation: str
     result: Any = None
     error: str | None = None
+    skill: str = ""
+    kind: ActionKind | None = None
+    arguments_digest: str = ""
+    result_digest: str = ""
+
+    @classmethod
+    def from_action(cls, action: Action, *, ok: bool, generation: str, result: Any = None, error: str | None = None) -> "Observation":
+        return cls(
+            action.id,
+            ok,
+            generation,
+            result,
+            error,
+            action.skill,
+            action.kind,
+            value_digest(action.arguments),
+            value_digest(result) if result is not None else "",
+        )
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "action_id": self.action_id,
+            "ok": self.ok,
+            "generation": self.generation,
+            "result": self.result,
+            "error": self.error,
+            "skill": self.skill,
+            "kind": self.kind.value if self.kind is not None else None,
+            "arguments_digest": self.arguments_digest,
+            "result_digest": self.result_digest,
+        }
 
 
 @dataclass(frozen=True)
