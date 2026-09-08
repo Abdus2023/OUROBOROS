@@ -1,8 +1,9 @@
-"""Kernel-facing planning bridge (M2.6).
+"""Kernel-facing planning bridge (M2.10).
 
 Planner output remains untrusted until validated. Planning attempts are
 identified by canonical request/response digests before proposals enter the
-kernel's normal planning lifecycle.
+kernel's normal planning lifecycle. Attempt history is derived from the
+append-only journal rather than trusted from mutable run state.
 """
 from __future__ import annotations
 
@@ -17,6 +18,20 @@ from .validator import PlanValidator, digest, request_digest
 
 PLANNING_FAILED = "PLANNING_FAILED"
 PLANNING_ACCEPTED = "PLANNING_ACCEPTED"
+PLANNING_ATTEMPT_EVENTS = frozenset({PLANNING_FAILED, PLANNING_ACCEPTED})
+
+
+def planning_attempt_count(kernel: Kernel, run_id: str) -> int:
+    """Derive the durable planning-attempt count from the journal.
+
+    ``Run.planning_attempts`` is retained as a compatibility cache only and
+    is never authoritative for planning budgets or attempt identity.
+    """
+    return sum(
+        1
+        for event in kernel.journal.events()
+        if event.run_id == run_id and event.name in PLANNING_ATTEMPT_EVENTS
+    )
 
 
 @dataclass(frozen=True)
@@ -36,17 +51,17 @@ class PlanningBridge:
 
     def _failure(self, run: Run, request_hash: str, response_hash: str,
                  violations: tuple[Any, ...], **data: Any) -> PlanningBridgeResult:
-        run.planning_attempts += 1
-        codes = tuple(v.code if hasattr(v, "code") else str(v) for v in violations)
+        attempt = planning_attempt_count(self.kernel, run.id) + 1
         payload = {
-            "attempt": run.planning_attempts,
+            "attempt": attempt,
             "request_digest": request_hash,
             "response_digest": response_hash,
-            "violations": list(codes),
+            "violations": [v.code if hasattr(v, "code") else str(v) for v in violations],
             **data,
         }
         self.kernel.journal.append(Event(PLANNING_FAILED, run.id, generation=run.generation, data=payload))
-        return PlanningBridgeResult(run, False, violations, run.planning_attempts, request_hash, response_hash)
+        run.planning_attempts = attempt
+        return PlanningBridgeResult(run, False, violations, attempt, request_hash, response_hash)
 
     def apply(self, request: PlanningRequest, response: Any) -> PlanningBridgeResult:
         """Create an INTAKE run and submit one planning attempt."""
@@ -65,9 +80,7 @@ class PlanningBridge:
             raise ValueError(f"replanning requires INTAKE run, found {run.state.value}")
         if request.run_id != run.id or request.objective != run.task:
             return self._failure(run, request_hash, response_hash, ("RUN_MISMATCH",), requested_run=request.run_id)
-
-        actual_generation = run.generation
-        if request.generation != actual_generation:
+        if request.generation != run.generation:
             return self._failure(run, request_hash, response_hash, ("STALE_GENERATION",), requested_generation=request.generation)
         if request.mutation_epoch != run.verification_epoch:
             return self._failure(run, request_hash, response_hash, ("STALE_EPOCH",), requested_epoch=request.mutation_epoch, actual_epoch=run.verification_epoch)
@@ -80,16 +93,16 @@ class PlanningBridge:
         if any(not isinstance(action, Action) for action in result.normalized_actions):
             raise TypeError("planning validator returned a non-Action object")
 
-        run.planning_attempts += 1
+        attempt = planning_attempt_count(self.kernel, run.id) + 1
         self.kernel.plan(run, Plan(request.objective, tuple(result.normalized_actions)))
         self.kernel.journal.append(Event(
             PLANNING_ACCEPTED,
             run.id,
-            generation=actual_generation,
-            data={
-                "attempt": run.planning_attempts,
-                "request_digest": request_hash,
-                "response_digest": response_hash,
-            },
+            generation=run.generation,
+            data={"attempt": attempt, "request_digest": request_hash, "response_digest": response_hash},
         ))
-        return PlanningBridgeResult(run, True, (), run.planning_attempts, request_hash, response_hash)
+        run.planning_attempts = attempt
+        return PlanningBridgeResult(run, True, (), attempt, request_hash, response_hash)
+
+
+__all__ = ["PLANNING_FAILED", "PLANNING_ACCEPTED", "planning_attempt_count", "PlanningBridge", "PlanningBridgeResult"]
