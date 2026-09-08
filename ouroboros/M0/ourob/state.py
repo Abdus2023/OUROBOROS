@@ -1,8 +1,9 @@
 """Fail-closed run state machine.
 
 There is deliberately no legal path from BLOCKED, FAILED, PLANNED or any
-other non-verified state directly to PROMOTED. The only route to PROMOTED
-runs through VERIFIED -> PROMOTABLE.
+other non-verified state directly to PROMOTED. Recovery quarantine is an
+explicit state: it can only be entered from an interrupted EXECUTING action
+and can only leave through an explicit reconciliation event.
 """
 
 from __future__ import annotations
@@ -19,14 +20,13 @@ ALLOWED_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     RunState.INTAKE: frozenset({RunState.PLANNED, RunState.BLOCKED}),
     RunState.PLANNED: frozenset({RunState.AUTHORIZED, RunState.BLOCKED}),
     RunState.AUTHORIZED: frozenset({RunState.EXECUTING, RunState.BLOCKED}),
-    RunState.EXECUTING: frozenset({RunState.OBSERVED, RunState.FAILED, RunState.BLOCKED}),
-    # OBSERVED -> AUTHORIZED allows a single authorized run to carry
-    # multiple mutations (M0.13). Only the kernel performs that step.
+    RunState.EXECUTING: frozenset({RunState.OBSERVED, RunState.FAILED, RunState.BLOCKED, RunState.QUARANTINED}),
     RunState.OBSERVED: frozenset({RunState.AUTHORIZED, RunState.VERIFYING}),
     RunState.VERIFYING: frozenset({RunState.VERIFIED, RunState.FAILED, RunState.BLOCKED}),
     RunState.VERIFIED: frozenset({RunState.PROMOTABLE}),
     RunState.PROMOTABLE: frozenset({RunState.PROMOTED}),
     RunState.PROMOTED: frozenset(),
+    RunState.QUARANTINED: frozenset({RunState.PLANNED, RunState.BLOCKED, RunState.FAILED}),
     RunState.BLOCKED: frozenset(),
     RunState.FAILED: frozenset(),
 }
