@@ -73,6 +73,29 @@ class Kernel:
             expected = " or ".join(s.value for s in states)
             raise KernelError(f"run {run.id} is {run.state}, expected {expected}")
 
+    def _durable_plan_digest(self, run: Run) -> str:
+        """Return the latest durable plan identity for this run, or fail closed."""
+        plans = [event for event in self.journal.events()
+                 if event.run_id == run.id and event.name == EventName.RUN_PLANNED.value]
+        if not plans:
+            raise KernelError("run has no durable RUN_PLANNED event")
+        event = plans[-1]
+        claimed = event.data.get("plan_digest")
+        actions = event.data.get("actions")
+        if not isinstance(claimed, str) or not claimed:
+            raise KernelError("RUN_PLANNED has no plan digest")
+        if not isinstance(actions, list) or not actions:
+            raise KernelError("RUN_PLANNED has no durable action list")
+        try:
+            durable = plan_digest(tuple(Action.from_record(record) for record in actions))
+        except (TypeError, ValueError) as exc:
+            raise KernelError("RUN_PLANNED action list is invalid") from exc
+        if durable != claimed:
+            raise KernelError("RUN_PLANNED plan digest is internally inconsistent")
+        if event.generation != run.generation:
+            raise KernelError("RUN_PLANNED generation does not match run generation")
+        return claimed
+
     def intake(self, run_id: str, task: str) -> Run:
         if not run_id or not task:
             raise KernelError("intake requires a run id and a task")
@@ -97,7 +120,12 @@ class Kernel:
 
     def authorize(self, run: Run) -> Run:
         self._require_state(run, RunState.PLANNED, RunState.OBSERVED)
-        self._emit(EventName.AUTHORIZATION_GRANTED, run, previous_state=run.state.value)
+        durable_digest = self._durable_plan_digest(run)
+        live_digest = plan_digest(tuple(run.planned))
+        if live_digest != durable_digest:
+            raise KernelError("live plan differs from durable RUN_PLANNED identity")
+        self._emit(EventName.AUTHORIZATION_GRANTED, run,
+                   previous_state=run.state.value, plan_digest=durable_digest)
         transition(run, RunState.AUTHORIZED)
         return run
 
