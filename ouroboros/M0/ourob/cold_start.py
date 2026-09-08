@@ -1,13 +1,8 @@
-"""Fail-closed cold-start recovery controller.
+"""Fail-closed cold-start recovery and quarantine controller.
 
-Recovery is deliberately read-only with respect to the journal: it first
-reconstructs durable state, then applies the cold-start boundary before a
-kernel is allowed to resume work.
-
-An ``EXECUTING`` run is unrecoverable as an automatically resumable run. The
-journal proves that an action was proposed, but absence of ``ACTION_EXECUTED``
-does not prove that no side effect occurred before a process crash. Such a
-run is therefore quarantined instead of replaying the action.
+Cold start reconstructs durable state without replaying capabilities. An
+interrupted ``EXECUTING`` action is not retried: it can be durably quarantined
+and must then be explicitly reconciled before the run can continue.
 """
 
 from __future__ import annotations
@@ -16,9 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .generation import repository_generation
-from .journal import Journal, JournalIntegrityError
-from .model import RunState
-from .recovery import RecoveredRun, RecoveryError, recover_from_journal
+from .journal import Journal
+from .model import Event, EventName, RunState
+from .recovery import RecoveredRun, RecoveryError, recover_from_journal, recover_run
 
 
 class ColdStartError(RuntimeError):
@@ -32,6 +27,7 @@ class ColdStartResult:
     recovered: RecoveredRun
     resumable: bool
     requires_reauthorization: bool = False
+    requires_reconciliation: bool = False
 
     @property
     def run(self):
@@ -41,28 +37,19 @@ class ColdStartResult:
 def cold_start_run(journal_path: Path, repo_root: Path, run_id: str) -> ColdStartResult:
     """Recover one run and enforce the process-boundary safety rules.
 
-    Terminal states are returned as-is. ``OBSERVED`` is resumable through the
-    normal kernel path, which requires durable plan validation and emits a new
-    authorization event before the next action. ``AUTHORIZED`` is also
-    resumable because the authorization itself is durable and has not crossed
-    an execution boundary yet.
-
-    ``EXECUTING`` is never resumed automatically because an action may have
-    reached the mutation boundary immediately before the crash while its
-    ``ACTION_EXECUTED`` record was still unwritten.
+    ``EXECUTING`` is reported as requiring reconciliation; it is never
+    automatically resumed. ``OBSERVED`` is resumable through the normal
+    kernel path, while ``AUTHORIZED`` preserves its durable authorization.
     """
-    try:
-        recovered = recover_from_journal(journal_path, run_id)
-    except RecoveryError:
-        raise
-    except JournalIntegrityError as exc:
-        raise ColdStartError(f"journal integrity failure: {exc}") from exc
-
+    recovered = recover_from_journal(journal_path, run_id)
     run = recovered.run
     current_generation = repository_generation(Path(repo_root).resolve()).id
+
     if run.state is RunState.EXECUTING:
-        raise ColdStartError(
-            f"run {run.id} stopped in EXECUTING; automatic replay is unsafe because mutation may have occurred"
+        return ColdStartResult(
+            recovered=recovered,
+            resumable=False,
+            requires_reconciliation=True,
         )
 
     if run.state in {RunState.AUTHORIZED, RunState.OBSERVED} and run.generation != current_generation:
@@ -77,4 +64,44 @@ def cold_start_run(journal_path: Path, repo_root: Path, run_id: str) -> ColdStar
     )
 
 
-__all__ = ["ColdStartError", "ColdStartResult", "cold_start_run"]
+def quarantine_run(journal_path: Path, run_id: str) -> RecoveredRun:
+    """Durably quarantine an interrupted ``EXECUTING`` run.
+
+    The append is serialized with journal integrity verification. The
+    validator reconstructs the current run while holding the journal lock, so
+    a second recovery worker cannot race a quarantine decision. No skill or
+    action is executed by this operation.
+    """
+    journal = Journal(journal_path)
+    holder: dict[str, RecoveredRun] = {}
+
+    def validate(records) -> None:
+        recovered = recover_run([record.event for record in records], run_id)
+        if recovered.run.state is not RunState.EXECUTING:
+            raise ColdStartError(
+                f"run {run_id} is not EXECUTING; cannot quarantine state {recovered.run.state}"
+            )
+        holder["recovered"] = recovered
+
+    recovered_before = None
+    try:
+        journal.append_checked(
+            Event(
+                EventName.RECOVERY_QUARANTINED.value,
+                run_id=run_id,
+                action_id=None,
+                generation=None,
+                data={"reason": "interrupted_execution"},
+            ),
+            validate,
+        )
+        recovered_before = holder["recovered"]
+    except RecoveryError as exc:
+        raise ColdStartError(str(exc)) from exc
+
+    # The event is intentionally reread from the validated journal so the
+    # returned object is the exact durable post-quarantine state.
+    return recover_from_journal(journal_path, run_id)
+
+
+__all__ = ["ColdStartError", "ColdStartResult", "cold_start_run", "quarantine_run"]
