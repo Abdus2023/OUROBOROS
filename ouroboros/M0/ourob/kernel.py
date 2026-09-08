@@ -154,7 +154,7 @@ class Kernel:
                        mutation_class=decision.mutation_class.value,
                        plan_digest=authorized_plan_digest)
             transition(run, RunState.BLOCKED)
-            observation = Observation(action.id, False, run.generation, None, decision.reason)
+            observation = Observation.from_action(action, ok=False, generation=run.generation, error=decision.reason)
             run.observations.append(observation)
             return ExecutionOutcome(observation, run.state, decision.reason)
         self._emit(EventName.POLICY_ALLOWED, run, action.id, reason=decision.reason,
@@ -162,12 +162,16 @@ class Kernel:
                    plan_digest=authorized_plan_digest)
         raw = self.skills.execute(action)
         new_generation = self._generation()
-        observation = Observation(action.id, raw.ok, new_generation, raw.result, raw.error)
+        observation = Observation.from_action(action, ok=raw.ok, generation=new_generation,
+                                              result=raw.result, error=raw.error)
         run.actions.append(action)
         run.observations.append(observation)
         if not observation.ok:
             self._emit(EventName.ACTION_FAILED, run, action.id,
-                       error=observation.error or "", plan_digest=authorized_plan_digest)
+                       error=observation.error or "", skill=action.skill, kind=action.kind.value,
+                       arguments_digest=observation.arguments_digest,
+                       result_digest=observation.result_digest,
+                       plan_digest=authorized_plan_digest)
             transition(run, RunState.FAILED)
             return ExecutionOutcome(observation, run.state, observation.error or "action failed")
         mutated = new_generation != run.generation
@@ -176,6 +180,9 @@ class Kernel:
             run.verification_epoch += 1
         self._emit(EventName.ACTION_EXECUTED, run, action.id, ok=True, mutated=mutated,
                    epoch=run.verification_epoch, plan_digest=authorized_plan_digest,
+                   skill=action.skill, kind=action.kind.value,
+                   arguments_digest=observation.arguments_digest,
+                   result_digest=observation.result_digest,
                    result=observation.result if isinstance(observation.result, (str, int, float, bool, list, dict)) else None)
         transition(run, RunState.OBSERVED)
         return ExecutionOutcome(observation, run.state, "observed")
