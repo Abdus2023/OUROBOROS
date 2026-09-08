@@ -1,9 +1,8 @@
-"""Kernel-facing planning bridge (M2.4).
+"""Kernel-facing planning bridge (M2.5).
 
 Planner output remains untrusted until validated. Planning failures are durable
-observations, while accepted proposals enter only the kernel's normal planning
-state; this bridge never grants authorization, executes actions, verifies, or
-promotes.
+observations, and repeated planning attempts never reset kernel authority,
+generation, or verification state.
 """
 from __future__ import annotations
 
@@ -11,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..kernel import Kernel
-from ..model import Action, Event, Plan, Run
+from ..model import Action, Event, Plan, Run, RunState
 from .model import PlanningRequest
 from .validator import PlanValidator
 
@@ -24,6 +23,7 @@ class PlanningBridgeResult:
     run: Run
     accepted: bool
     violations: tuple[Any, ...] = ()
+    attempt: int = 0
 
 
 class PlanningBridge:
@@ -31,59 +31,51 @@ class PlanningBridge:
         self.kernel = kernel
         self.validator = validator
 
-    def apply(self, request: PlanningRequest, response: Any) -> PlanningBridgeResult:
-        """Validate a proposal against the live kernel boundary.
+    def _failure(self, run: Run, violations: tuple[Any, ...], **data: Any) -> PlanningBridgeResult:
+        run.planning_attempts += 1
+        codes = tuple(v.code if hasattr(v, "code") else str(v) for v in violations)
+        payload = {"attempt": run.planning_attempts, "violations": list(codes), **data}
+        self.kernel.journal.append(Event(PLANNING_FAILED, run.id, generation=run.generation, data=payload))
+        return PlanningBridgeResult(run=run, accepted=False, violations=violations, attempt=run.planning_attempts)
 
-        A rejected proposal is recorded against a freshly-created INTAKE run,
-        but does not alter its state, generation, or verification epoch. A
-        caller may subsequently issue a new planning request; that request
-        must carry the then-current generation/epoch and still pass validation.
-        """
+    def apply(self, request: PlanningRequest, response: Any) -> PlanningBridgeResult:
+        """Create an INTAKE run and submit one planning attempt."""
         run = self.kernel.intake(request.run_id, request.objective)
+        return self.apply_to_run(run, request, response)
+
+    def apply_to_run(self, run: Run, request: PlanningRequest, response: Any) -> PlanningBridgeResult:
+        """Submit a fresh proposal to an existing INTAKE run.
+
+        Replanning is deliberately narrower than execution: only an INTAKE
+        run can receive a plan. A failed attempt leaves the run in INTAKE and
+        increments only the non-authoritative attempt counter.
+        """
+        if run.state is not RunState.INTAKE:
+            raise ValueError(f"replanning requires INTAKE run, found {run.state.value}")
+        if request.run_id != run.id or request.objective != run.task:
+            return self._failure(run, ("RUN_MISMATCH",), requested_run=request.run_id)
+
         actual_generation = run.generation
         if request.generation != actual_generation:
-            violations = ("STALE_GENERATION",)
-            self.kernel.journal.append(
-                Event(
-                    PLANNING_FAILED,
-                    run.id,
-                    generation=actual_generation,
-                    data={"violations": list(violations), "requested_generation": request.generation},
-                )
+            return self._failure(
+                run, ("STALE_GENERATION",),
+                requested_generation=request.generation,
             )
-            return PlanningBridgeResult(run=run, accepted=False, violations=violations)
         if request.mutation_epoch != run.verification_epoch:
-            violations = ("STALE_EPOCH",)
-            self.kernel.journal.append(
-                Event(
-                    PLANNING_FAILED,
-                    run.id,
-                    generation=actual_generation,
-                    data={"violations": list(violations), "requested_epoch": request.mutation_epoch, "actual_epoch": run.verification_epoch},
-                )
+            return self._failure(
+                run, ("STALE_EPOCH",),
+                requested_epoch=request.mutation_epoch,
+                actual_epoch=run.verification_epoch,
             )
-            return PlanningBridgeResult(run=run, accepted=False, violations=violations)
 
         result = self.validator.validate(request, response)
         if not result.accepted:
-            codes = tuple(v.code for v in result.violations)
-            self.kernel.journal.append(
-                Event(
-                    PLANNING_FAILED,
-                    run.id,
-                    generation=actual_generation,
-                    data={"violations": list(codes)},
-                )
-            )
-            return PlanningBridgeResult(run=run, accepted=False, violations=result.violations)
+            return self._failure(run, result.violations)
         if not result.normalized_actions:
-            violation = "EMPTY_PLAN"
-            self.kernel.journal.append(
-                Event(PLANNING_FAILED, run.id, generation=actual_generation, data={"violations": [violation]})
-            )
-            return PlanningBridgeResult(run=run, accepted=False, violations=(violation,))
+            return self._failure(run, ("EMPTY_PLAN",))
         if any(not isinstance(action, Action) for action in result.normalized_actions):
             raise TypeError("planning validator returned a non-Action object")
 
+        run.planning_attempts += 1
         self.kernel.plan(run, Plan(request.objective, tuple(result.normalized_actions)))
-        return PlanningBridgeResult(run=run, accepted=True)
+        return PlanningBridgeResult(run=run, accepted=True, attempt=run.planning_attempts)
