@@ -18,7 +18,7 @@ from typing import Iterable
 
 from .evidence import VerificationEvidence, capture_evidence
 from .generation import repository_generation
-from .journal import Journal
+from .journal import Journal, observation_audit_record, observation_digest
 from .model import Action, Event, EventName, Observation, Plan, Run, RunState, VerificationStatus, plan_digest
 from .policy import PolicyEngine
 from .promotion import PromotionAuthority, PromotionDecision
@@ -104,6 +104,10 @@ class Kernel:
             raise KernelError("live plan differs from durable authorized plan identity")
         return durable
 
+    def verify_durable_observations(self) -> bool:
+        """Verify every durable execution observation without executing skills."""
+        return self.journal.verify_observations()
+
     def intake(self, run_id: str, task: str) -> Run:
         if not run_id or not task:
             raise KernelError("intake requires a run id and a task")
@@ -150,11 +154,13 @@ class Kernel:
         transition(run, RunState.EXECUTING)
         decision = self.policy.evaluate(action)
         if not decision.allowed:
+            observation = Observation.from_action(action, ok=False, generation=run.generation, error=decision.reason)
             self._emit(EventName.POLICY_DENIED, run, action.id, reason=decision.reason,
                        mutation_class=decision.mutation_class.value,
-                       plan_digest=authorized_plan_digest)
+                       plan_digest=authorized_plan_digest,
+                       observation=observation_audit_record(observation),
+                       observation_digest=observation_digest(observation))
             transition(run, RunState.BLOCKED)
-            observation = Observation.from_action(action, ok=False, generation=run.generation, error=decision.reason)
             run.observations.append(observation)
             return ExecutionOutcome(observation, run.state, decision.reason)
         self._emit(EventName.POLICY_ALLOWED, run, action.id, reason=decision.reason,
@@ -171,7 +177,9 @@ class Kernel:
                        error=observation.error or "", skill=action.skill, kind=action.kind.value,
                        arguments_digest=observation.arguments_digest,
                        result_digest=observation.result_digest,
-                       plan_digest=authorized_plan_digest)
+                       plan_digest=authorized_plan_digest,
+                       observation=observation_audit_record(observation),
+                       observation_digest=observation_digest(observation))
             transition(run, RunState.FAILED)
             return ExecutionOutcome(observation, run.state, observation.error or "action failed")
         mutated = new_generation != run.generation
@@ -183,6 +191,8 @@ class Kernel:
                    skill=action.skill, kind=action.kind.value,
                    arguments_digest=observation.arguments_digest,
                    result_digest=observation.result_digest,
+                   observation=observation_audit_record(observation),
+                   observation_digest=observation_digest(observation),
                    result=observation.result if isinstance(observation.result, (str, int, float, bool, list, dict)) else None)
         transition(run, RunState.OBSERVED)
         return ExecutionOutcome(observation, run.state, "observed")
