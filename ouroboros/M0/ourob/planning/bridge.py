@@ -1,4 +1,4 @@
-"""Kernel-facing planning bridge (M2.14).
+"""Kernel-facing planning bridge (M2.15).
 
 Planner output remains untrusted until validated. Planning attempts are
 identified by canonical request/response digests before proposals enter the
@@ -19,11 +19,7 @@ from .validator import PlanValidator, digest, request_digest
 
 
 def planning_history(kernel: Kernel, run_id: str):
-    """Return canonical journal-derived planning state.
-
-    The local import intentionally avoids a module cycle because the legacy
-    history module still re-exports planning event names from this bridge.
-    """
+    """Return canonical journal-derived planning state."""
     from .history import reconstruct_planning_history
     return reconstruct_planning_history(kernel, run_id)
 
@@ -57,6 +53,7 @@ class PlanningBridge:
             "request_digest": request_hash,
             "response_digest": response_hash,
             "violations": [v.code if hasattr(v, "code") else str(v) for v in violations],
+            "mutation_epoch": run.verification_epoch,
             **data,
         }
         self.kernel.journal.append(Event(PLANNING_FAILED, run.id, generation=run.generation, data=payload))
@@ -106,6 +103,7 @@ class PlanningBridge:
                 "request_digest": request_hash,
                 "response_digest": response_hash,
                 "plan_digest": canonical_plan_hash,
+                "mutation_epoch": run.verification_epoch,
             },
         ))
         run.planning_attempts = attempt
